@@ -89,7 +89,7 @@ def test_permutation_roundtrip():
     schema = load_schema_index(SCHEMAS / "24.4R2-EVO.json")
     root = normalize_tree(parse_config(text))
     rng = random.Random(42)
-    shuffle_reorderable(root, (), schema, rng)
+    shuffle_reorderable(root, "", schema, rng)
     shuffled = render_config(denormalize_tree(root))
     assert sort_text(shuffled) == golden
 

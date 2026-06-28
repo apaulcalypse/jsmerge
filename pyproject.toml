@@ -21,6 +21,9 @@ dev = [
 build-schema = [
     "pyang>=2.7",
 ]
+fast = [
+    "orjson>=3.9",
+]
 
 [project.scripts]
 jsmerge = "jsmerge.cli.main:app"
@@ -37,3 +40,8 @@ pythonpath = ["src"]
 markers = [
     "slow: integration tests that compile YANG (may take ~90s)",
 ]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingModuleSource = false

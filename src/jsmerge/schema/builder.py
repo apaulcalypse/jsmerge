@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Literal
 
+from jsmerge.schema._pyang import load_pyang
+
 # When focus_only is True, these top-level stanzas (plus root) are guaranteed in output
 # but the full tree is still built from the resolved schema.
 FOCUS_STANZAS = frozenset({"interfaces", "policy-options", "firewall"})
@@ -59,25 +61,36 @@ def build_schema_index(
     version: str,
     platform: Literal["evo", "classic"],
     focus_only: bool = True,
+    progress=None,
 ) -> dict:
-    try:
-        from pyang import context
-        from pyang import repository as yang_repository
-    except ImportError as exc:
-        raise RuntimeError("pyang is required for schema build; pip install jsmerge[build-schema]") from exc
+    context, yang_repository = load_pyang()
 
     yang_dir = Path(yang_dir)
     module_paths = sorted(yang_dir.glob("*.yang"))
     if not module_paths:
         raise FileNotFoundError(f"No .yang files found in {yang_dir}")
 
+    total_modules = len(module_paths)
+    if progress is not None:
+        progress.step(f"Loading {total_modules} YANG modules")
+
     repo = yang_repository.FileRepository(str(yang_dir))
     ctx = context.Context(repo)
 
-    for path in module_paths:
+    for index, path in enumerate(module_paths, start=1):
         ctx.add_module(path.as_posix(), path.read_text(encoding="utf-8"))
+        if progress is not None and (index == 1 or index == total_modules or index % 25 == 0):
+            progress.update(f"Loading YANG modules ({index}/{total_modules})")
+
+    if progress is not None:
+        progress.finish(f"Loaded {total_modules} YANG modules")
+        progress.step("Validating YANG modules")
 
     ctx.validate()
+
+    if progress is not None:
+        progress.finish("Validated YANG modules")
+        progress.step("Building schema index from YANG tree")
 
     configuration = _find_configuration_container(ctx)
     nodes: dict[str, dict] = {}
@@ -130,6 +143,9 @@ def build_schema_index(
     if focus_only:
         nodes = _filter_focus_nodes(nodes)
 
+    if progress is not None:
+        progress.finish(f"Built schema index ({len(nodes):,} paths)")
+
     return {
         "version": version,
         "platform": platform,
@@ -172,7 +188,28 @@ def write_schema_index(
     version: str,
     platform: Literal["evo", "classic"],
     focus_only: bool = True,
+    progress=None,
 ) -> None:
-    payload = build_schema_index(yang_dir, version=version, platform=platform, focus_only=focus_only)
+    from jsmerge.schema.loader import _parse_schema_payload, write_schema_cache
+
+    payload = build_schema_index(
+        yang_dir,
+        version=version,
+        platform=platform,
+        focus_only=focus_only,
+        progress=progress,
+    )
+    if progress is not None:
+        progress.step(f"Writing schema bundle to {output}")
+
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if progress is not None:
+        progress.finish(f"Wrote schema bundle to {output}")
+        progress.step("Writing schema cache")
+
+    write_schema_cache(_parse_schema_payload(payload), output)
+
+    if progress is not None:
+        progress.finish("Wrote schema cache")

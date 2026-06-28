@@ -12,8 +12,9 @@ import typer
 from jsmerge.normalize import denormalize_tree, normalize_tree
 from jsmerge.parser import parse_config
 from jsmerge.render import render_config
+from jsmerge.progress import NullProgress, TerminalProgress
 from jsmerge.schema.build import build_schema_from_release
-from jsmerge.schema.loader import load_schema_index, resolve_schema_path
+from jsmerge.schema.loader import load_schema_index, release_schema_memory_cache, resolve_schema_path
 from jsmerge.sort import SortEngine
 
 app = typer.Typer(
@@ -75,6 +76,8 @@ def sort_command(
     else:
         typer.echo(rendered, nl=False)
 
+    release_schema_memory_cache()
+
 
 @schema_app.command("build")
 def schema_build_command(
@@ -92,8 +95,10 @@ def schema_build_command(
     github_ref: str = typer.Option("master", "--github-ref", help="Git branch/tag in Juniper/yang."),
     refresh: bool = typer.Option(False, "--refresh", help="Re-download YANG even if cached."),
     all_modules: bool = typer.Option(False, "--all-modules", help="Include all modules, not only Phase 1 stanzas."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output."),
 ) -> None:
     """Compile YANG modules into a schema ordering index."""
+    progress = NullProgress() if quiet else TerminalProgress()
     modules_dir = build_schema_from_release(
         output,
         version=version,
@@ -102,10 +107,15 @@ def schema_build_command(
         github_ref=github_ref,
         force_fetch=refresh,
         focus_only=not all_modules,
+        progress=progress,
     )
-    typer.echo(f"Wrote schema bundle to {output}")
-    if yang_dir is None:
-        typer.echo(f"YANG modules from GitHub cached at {modules_dir}")
+    if quiet:
+        typer.echo(f"Wrote schema bundle to {output}")
+        cache = output.with_name(output.name + ".cache")
+        if cache.is_file():
+            typer.echo(f"Wrote schema cache to {cache}")
+        if yang_dir is None:
+            typer.echo(f"YANG modules from GitHub cached at {modules_dir}")
 
 
 if __name__ == "__main__":

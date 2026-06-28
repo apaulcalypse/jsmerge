@@ -9,7 +9,7 @@ from jsmerge.models import ConfigNode
 from jsmerge.normalize import denormalize_tree, normalize_tree
 from jsmerge.parser import parse_config
 from jsmerge.render import render_config
-from jsmerge.schema.loader import SchemaPath, load_schema_index
+from jsmerge.schema.loader import SchemaPath, join_schema_path, load_schema_index
 from jsmerge.sort import SortEngine
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -29,10 +29,10 @@ def sort_text(text: str, schema_name: str = "24.4R2-EVO") -> str:
 
 def _children_schema_path(path: SchemaPath, node: ConfigNode, schema) -> SchemaPath:
     if node.value is not None:
-        valued = path + (node.name, node.value)
+        valued = join_schema_path(path, node.name, node.value)
         if schema.get_rule(valued) is not None:
             return valued
-    return path + (node.name,)
+    return join_schema_path(path, node.name)
 
 
 def shuffle_reorderable(

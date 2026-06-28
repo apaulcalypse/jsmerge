@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
+import pickle
 import re
 from dataclasses import dataclass, field
-from importlib import resources
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-SchemaPath = tuple[str, ...]
+logger = logging.getLogger(__name__)
+
+SchemaPath = str
+CACHE_SUFFIX = ".cache"
 
 
 @dataclass
@@ -32,15 +37,27 @@ class SchemaIndex:
     nodes: dict[SchemaPath, NodeRule]
 
     def get_rule(self, path: SchemaPath) -> NodeRule | None:
+        if isinstance(path, tuple):
+            path = "/".join(path)
         return self.nodes.get(path)
 
     @staticmethod
     def path_to_str(path: SchemaPath) -> str:
-        return "/".join(path)
+        if isinstance(path, tuple):
+            return "/".join(path)
+        return path
 
     @staticmethod
     def str_to_path(text: str) -> SchemaPath:
-        return tuple(part for part in text.split("/") if part)
+        return text
+
+
+def join_schema_path(parent: SchemaPath, *segments: str) -> SchemaPath:
+    """Join schema path segments using Juniper's slash notation."""
+    if isinstance(parent, tuple):
+        parent = "/".join(parent)
+    parts = [parent, *segments] if parent else list(segments)
+    return "/".join(part for part in parts if part)
 
 
 def _parse_list_rule(data: dict) -> ListRule:
@@ -56,16 +73,73 @@ def _parse_node_rule(data: dict) -> NodeRule:
     return NodeRule(child_order=list(data.get("child_order", [])), lists=lists)
 
 
-def load_schema_index(path: Path) -> SchemaIndex:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    nodes: dict[SchemaPath, NodeRule] = {}
-    for path_str, rule_data in payload["nodes"].items():
-        nodes[SchemaIndex.str_to_path(path_str)] = _parse_node_rule(rule_data)
+def _load_json(path: Path) -> dict:
+    raw = path.read_bytes()
+    try:
+        import orjson
+
+        return orjson.loads(raw)
+    except ImportError:
+        return json.loads(raw.decode("utf-8"))
+
+
+def _parse_schema_payload(payload: dict) -> SchemaIndex:
+    nodes = {path_str: _parse_node_rule(rule_data) for path_str, rule_data in payload["nodes"].items()}
     return SchemaIndex(
         version=payload["version"],
         platform=payload["platform"],
         nodes=nodes,
     )
+
+
+def _parse_schema_json(path: Path) -> SchemaIndex:
+    return _parse_schema_payload(_load_json(path))
+
+
+def schema_cache_path(json_path: Path) -> Path:
+    return json_path.with_name(json_path.name + CACHE_SUFFIX)
+
+
+def write_schema_cache(index: SchemaIndex, json_path: Path) -> Path:
+    """Write a pickle cache for faster subsequent loads."""
+    cache_path = schema_cache_path(json_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("wb") as handle:
+        pickle.dump(index, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    return cache_path
+
+
+@lru_cache(maxsize=8)
+def _load_schema_cached(resolved: str, mtime_ns: int) -> SchemaIndex:
+    path = Path(resolved)
+    cache_path = schema_cache_path(path)
+
+    if cache_path.is_file() and cache_path.stat().st_mtime_ns >= mtime_ns:
+        try:
+            with cache_path.open("rb") as handle:
+                index = pickle.load(handle)
+            logger.debug("Loaded schema cache %s", cache_path)
+            return index
+        except (OSError, pickle.UnpicklingError) as exc:
+            logger.debug("Schema cache unreadable (%s); rebuilding from JSON", exc)
+
+    index = _parse_schema_json(path)
+    try:
+        write_schema_cache(index, path)
+        logger.debug("Wrote schema cache %s", cache_path)
+    except OSError as exc:
+        logger.debug("Could not write schema cache: %s", exc)
+    return index
+
+def load_schema_index(path: Path) -> SchemaIndex:
+    resolved = path.resolve()
+    mtime_ns = resolved.stat().st_mtime_ns
+    return _load_schema_cached(str(resolved), mtime_ns)
+
+
+def release_schema_memory_cache() -> None:
+    """Drop in-memory schema indexes to avoid slow process teardown."""
+    _load_schema_cached.cache_clear()
 
 
 def schema_bundle_dir() -> Path:
@@ -147,7 +221,6 @@ def find_schema_for_version(
         return exact[0]
 
     is_evo = "evo" in version.lower()
-    platform_suffix = "-EVO" if is_evo else ""
     base = version.replace("-EVO", "").replace("-evo", "")
     partial = [b for b in bundles if b.stem.lower().startswith(base.lower())]
     if is_evo:

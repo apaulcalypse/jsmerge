@@ -6,7 +6,7 @@ import logging
 from collections import defaultdict
 
 from jsmerge.models import ConfigNode
-from jsmerge.schema.loader import NodeRule, SchemaIndex, SchemaPath
+from jsmerge.schema.loader import NodeRule, SchemaIndex, SchemaPath, join_schema_path
 from jsmerge.sort.comparators import sort_key_for_nodes
 
 logger = logging.getLogger(__name__)
@@ -16,27 +16,35 @@ class SortEngine:
     def __init__(self, schema: SchemaIndex, *, strict: bool = False) -> None:
         self.schema = schema
         self.strict = strict
+        self._path_cache: dict[tuple[str, str, str | None], SchemaPath] = {}
 
     def sort(self, root: ConfigNode) -> ConfigNode:
-        sorted_root = root.clone()
-        if sorted_root.name == "configuration":
-            sorted_root.children = self._sort_children(sorted_root.children, ())
+        if root.name == "configuration":
+            root.children = self._sort_children(root.children, "")
         else:
-            sorted_root.children = self._sort_children(sorted_root.children, (sorted_root.name,))
-        return sorted_root
+            root.children = self._sort_children(root.children, root.name)
+        return root
 
     def _children_schema_path(self, path: SchemaPath, node: ConfigNode) -> SchemaPath:
+        cache_key = (path, node.name, node.value)
+        cached = self._path_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         if node.value is not None:
-            valued = path + (node.name, node.value)
+            valued = join_schema_path(path, node.name, node.value)
             if self.schema.get_rule(valued) is not None:
+                self._path_cache[cache_key] = valued
                 return valued
-        return path + (node.name,)
+        result = join_schema_path(path, node.name)
+        self._path_cache[cache_key] = result
+        return result
 
     def _sort_children(self, children: list[ConfigNode], path: SchemaPath) -> list[ConfigNode]:
         rule = self.schema.get_rule(path)
         if rule is None:
             if self.strict:
-                path_str = "/".join(path) or "<root>"
+                path_str = path or "<root>"
                 raise ValueError(f"No schema rule for path: {path_str}")
             rule = NodeRule()
 
@@ -45,6 +53,7 @@ class SortEngine:
             grouped[child.name].append(child)
 
         ordered_names = self._ordered_child_names(grouped.keys(), rule)
+        ordered_set = set(ordered_names)
         result: list[ConfigNode] = []
 
         for name in ordered_names:
@@ -60,6 +69,8 @@ class SortEngine:
                 result.append(node)
 
         for name in sorted(grouped.keys()):
+            if name in ordered_set:
+                continue
             for node in grouped[name]:
                 node.children = self._sort_children(
                     node.children,
@@ -72,7 +83,8 @@ class SortEngine:
     def _ordered_child_names(self, names, rule: NodeRule) -> list[str]:
         names_set = set(names)
         ordered: list[str] = [name for name in rule.child_order if name in names_set]
-        remaining = sorted(names_set - set(ordered))
+        ordered_set = set(ordered)
+        remaining = sorted(name for name in names_set if name not in ordered_set)
         return ordered + remaining
 
     def _sort_list(self, nodes: list[ConfigNode], list_rule) -> list[ConfigNode]:

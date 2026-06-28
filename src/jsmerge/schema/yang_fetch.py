@@ -101,7 +101,13 @@ def _download_file(repo_path: str, dest: Path, ref: str) -> None:
         dest.write_bytes(response.read())
 
 
-def _fetch_directory(repo_path: str, dest_dir: Path, ref: str) -> int:
+def _fetch_directory(
+    repo_path: str,
+    dest_dir: Path,
+    ref: str,
+    *,
+    on_file=None,
+) -> int:
     """Recursively download .yang files; return count downloaded."""
     try:
         entries = _github_get_json(_api_contents_url(repo_path, ref))
@@ -120,8 +126,10 @@ def _fetch_directory(repo_path: str, dest_dir: Path, ref: str) -> int:
         if entry["type"] == "file" and name.endswith(".yang"):
             _download_file(entry_path, dest_dir / name, ref)
             count += 1
+            if on_file is not None:
+                on_file(name, count)
         elif entry["type"] == "dir":
-            count += _fetch_directory(entry_path, dest_dir / name, ref)
+            count += _fetch_directory(entry_path, dest_dir / name, ref, on_file=on_file)
     return count
 
 
@@ -131,6 +139,7 @@ def fetch_yang_models(
     dest_dir: Path | None = None,
     ref: str = DEFAULT_GITHUB_REF,
     force: bool = False,
+    progress=None,
 ) -> Path:
     """
     Download YANG modules for a Junos release into a local directory.
@@ -142,23 +151,36 @@ def fetch_yang_models(
     yang_dir = cache_dir / "modules"
 
     if not force and any(yang_dir.glob("*.yang")):
+        cached_count = sum(1 for _ in yang_dir.glob("*.yang"))
+        if progress is not None:
+            progress.finish(f"Using cached YANG modules ({cached_count} files)")
         return yang_dir
+
+    if progress is not None:
+        progress.step(f"Downloading YANG models for {version} from GitHub")
 
     yang_dir.mkdir(parents=True, exist_ok=True)
     for stale in yang_dir.glob("*.yang"):
         stale.unlink()
 
+    def on_file(name: str, count: int) -> None:
+        if progress is not None:
+            progress.update(f"Downloading YANG models for {version} ({count} files, latest: {name})")
+
     total = 0
     for subdir in YANG_SOURCE_DIRS:
         repo_path = f"{release.github_conf_root}/{subdir}"
         target = yang_dir
-        total += _fetch_directory(repo_path, target, ref)
+        total += _fetch_directory(repo_path, target, ref, on_file=on_file)
 
     if total == 0:
         raise RuntimeError(
             f"No YANG modules found at {release.github_conf_root} in {JUNIPER_YANG_REPO} (ref={ref}). "
             "Check the version string matches the GitHub directory layout."
         )
+
+    if progress is not None:
+        progress.finish(f"Downloaded {total} YANG modules")
 
     return yang_dir
 
