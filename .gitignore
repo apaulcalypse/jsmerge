@@ -1,0 +1,12 @@
+# Keep virtualenv and caches out of git
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Built schema bundles are generated via `jsmerge schema build` (can be large)
+schemas/*
+!schemas/24.4R2-EVO.json

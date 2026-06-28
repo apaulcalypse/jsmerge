@@ -1,0 +1,112 @@
+"""jsmerge command-line interface."""
+
+from __future__ import annotations
+
+import logging
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
+import typer
+
+from jsmerge.normalize import denormalize_tree, normalize_tree
+from jsmerge.parser import parse_config
+from jsmerge.render import render_config
+from jsmerge.schema.build import build_schema_from_release
+from jsmerge.schema.loader import load_schema_index, resolve_schema_path
+from jsmerge.sort import SortEngine
+
+app = typer.Typer(
+    name="jsmerge",
+    help="Sort and merge Juniper Junos configurations.",
+    no_args_is_help=True,
+)
+schema_app = typer.Typer(help="Schema index commands.")
+app.add_typer(schema_app, name="schema")
+
+
+class Platform(str, Enum):
+    evo = "evo"
+    classic = "classic"
+
+
+def _read_input(path: Path | None) -> str:
+    if path is None or str(path) == "-":
+        import sys
+
+        return sys.stdin.read()
+    return path.read_text(encoding="utf-8")
+
+
+def _config_version(root) -> str | None:
+    for child in root.children:
+        if child.name == "version" and child.value:
+            return child.value
+    return None
+
+
+@app.command("sort")
+def sort_command(
+    input: Path = typer.Argument(..., help="Input config file, or - for stdin."),
+    output: Optional[Path] = typer.Option(None, "-o", "--output", help="Output file (default: stdout)."),
+    schema: str = typer.Option("auto", "--schema", help="Schema bundle name/path, or 'auto'."),
+    strict: bool = typer.Option(False, "--strict", help="Error on unknown schema paths."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
+) -> None:
+    """Sort a Junos configuration into canonical order."""
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.WARNING)
+
+    text = _read_input(input)
+    root = normalize_tree(parse_config(text))
+    config_version = _config_version(root)
+    schema_path = resolve_schema_path(schema, config_version=config_version)
+    if verbose:
+        typer.echo(f"Using schema: {schema_path}", err=True)
+        if config_version:
+            typer.echo(f"Config version: {config_version}", err=True)
+
+    index = load_schema_index(schema_path)
+    engine = SortEngine(index, strict=strict)
+    sorted_root = denormalize_tree(engine.sort(root))
+    rendered = render_config(sorted_root)
+
+    if output:
+        output.write_text(rendered, encoding="utf-8")
+    else:
+        typer.echo(rendered, nl=False)
+
+
+@schema_app.command("build")
+def schema_build_command(
+    yang_dir: Optional[Path] = typer.Argument(
+        None,
+        help="Local YANG directory (optional; default: fetch from Juniper/yang on GitHub).",
+    ),
+    output: Path = typer.Option(..., "-o", "--output", help="Output schema JSON path."),
+    version: str = typer.Option(..., "--version", help="Junos release, e.g. 25.4R1-EVO or 25.4R1."),
+    platform: Optional[Platform] = typer.Option(
+        None,
+        "--platform",
+        help="Override platform tag in bundle (default: inferred from -EVO suffix).",
+    ),
+    github_ref: str = typer.Option("master", "--github-ref", help="Git branch/tag in Juniper/yang."),
+    refresh: bool = typer.Option(False, "--refresh", help="Re-download YANG even if cached."),
+    all_modules: bool = typer.Option(False, "--all-modules", help="Include all modules, not only Phase 1 stanzas."),
+) -> None:
+    """Compile YANG modules into a schema ordering index."""
+    modules_dir = build_schema_from_release(
+        output,
+        version=version,
+        yang_dir=yang_dir,
+        platform=platform.value if platform else None,
+        github_ref=github_ref,
+        force_fetch=refresh,
+        focus_only=not all_modules,
+    )
+    typer.echo(f"Wrote schema bundle to {output}")
+    if yang_dir is None:
+        typer.echo(f"YANG modules from GitHub cached at {modules_dir}")
+
+
+if __name__ == "__main__":
+    app()

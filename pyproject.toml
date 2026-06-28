@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jsmerge"
+version = "0.1.0"
+description = "Sort and merge Juniper Junos configurations to canonical show-configuration order"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pyang>=2.7",
+]
+build-schema = [
+    "pyang>=2.7",
+]
+
+[project.scripts]
+jsmerge = "jsmerge.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jsmerge"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/jsmerge", "schemas", "docs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "slow: integration tests that compile YANG (may take ~90s)",
+]
