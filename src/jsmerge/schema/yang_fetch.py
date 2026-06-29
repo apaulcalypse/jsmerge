@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -20,6 +21,23 @@ YANG_SOURCE_DIRS = (
 )
 
 _VERSION_RE = re.compile(r"^(?P<major_minor>\d+\.\d+)(?P<rest>R.+)$", re.IGNORECASE)
+
+
+def _github_auth_headers() -> dict[str, str]:
+    """Return Authorization header if a token is set.
+
+    Checks jsmerge-specific variables first to avoid conflicting with
+    company/private repo tokens stored in GITHUB_TOKEN / GH_TOKEN.
+    """
+    token = (
+        os.environ.get("JSMERGE_GITHUB_TOKEN")
+        or os.environ.get("JSMERGE_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GH_TOKEN")
+    )
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
 
 
 @dataclass(frozen=True)
@@ -80,23 +98,23 @@ def _raw_url(repo_path: str, ref: str) -> str:
 
 
 def _github_get_json(url: str) -> list | dict:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "jsmerge-schema-builder",
-        },
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "jsmerge-schema-builder",
+        **_github_auth_headers(),
+    }
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
 
 
 def _download_file(repo_path: str, dest: Path, ref: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(
-        _raw_url(repo_path, ref),
-        headers={"User-Agent": "jsmerge-schema-builder"},
-    )
+    headers = {
+        "User-Agent": "jsmerge-schema-builder",
+        **_github_auth_headers(),
+    }
+    request = urllib.request.Request(_raw_url(repo_path, ref), headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
         dest.write_bytes(response.read())
 

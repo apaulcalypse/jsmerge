@@ -206,6 +206,33 @@ def latest_schema_bundle(
     return sorted(bundles, key=lambda p: _version_sort_key(p.stem), reverse=True)[0]
 
 
+def _schema_base_candidates(version: str) -> list[str]:
+    """Generate possible schema bundle name prefixes for a Junos version.
+
+    Service releases (e.g. 23.4R2-S3.3-EVO) should fall back to the parent
+    release schema (23.4R2-EVO).
+    """
+    v = version.upper().replace("-EVO", "").replace("_EVO", "")
+    candidates = [version]
+
+    # Strip service release suffix (-S3.3, -D10, etc.)
+    service_stripped = re.sub(r"[-_]S\d+(?:\.\d+)*", "", v, flags=re.IGNORECASE)
+    service_stripped = re.sub(r"[-_]D\d+(?:\.\d+)*", "", service_stripped, flags=re.IGNORECASE)
+    if service_stripped != v:
+        candidates.append(service_stripped + ("-EVO" if "EVO" in version.upper() else ""))
+
+    # Also try just the major.minorR* part as a last resort
+    m = re.match(r"^(\d+\.\d+R\d+)", v)
+    if m:
+        base = m.group(1)
+        if "EVO" in version.upper():
+            base += "-EVO"
+        if base not in candidates:
+            candidates.append(base)
+
+    return candidates
+
+
 def find_schema_for_version(
     version: str,
     *,
@@ -221,14 +248,16 @@ def find_schema_for_version(
         return exact[0]
 
     is_evo = "evo" in version.lower()
-    base = version.replace("-EVO", "").replace("-evo", "")
-    partial = [b for b in bundles if b.stem.lower().startswith(base.lower())]
-    if is_evo:
-        partial = [b for b in partial if b.stem.upper().endswith("-EVO")]
-    else:
-        partial = [b for b in partial if not b.stem.upper().endswith("-EVO")]
-    if partial:
-        return sorted(partial, key=lambda p: _version_sort_key(p.stem), reverse=True)[0]
+    candidates = _schema_base_candidates(version)
+
+    for base in candidates:
+        partial = [b for b in bundles if b.stem.lower().startswith(base.lower())]
+        if is_evo:
+            partial = [b for b in partial if b.stem.upper().endswith("-EVO")]
+        else:
+            partial = [b for b in partial if not b.stem.upper().endswith("-EVO")]
+        if partial:
+            return sorted(partial, key=lambda p: _version_sort_key(p.stem), reverse=True)[0]
 
     return latest_schema_bundle(platform="evo" if is_evo else "classic", directory=directory)
 

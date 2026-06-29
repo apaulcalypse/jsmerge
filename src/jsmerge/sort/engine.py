@@ -26,13 +26,14 @@ class SortEngine:
         return root
 
     def _children_schema_path(self, path: SchemaPath, node: ConfigNode) -> SchemaPath:
-        cache_key = (path, node.name, node.value)
+        val = node.raw_tail[0] if node.raw_tail else None
+        cache_key = (path, node.name, val)
         cached = self._path_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        if node.value is not None:
-            valued = join_schema_path(path, node.name, node.value)
+        if val is not None:
+            valued = join_schema_path(path, node.name, val)
             if self.schema.get_rule(valued) is not None:
                 self._path_cache[cache_key] = valued
                 return valued
@@ -59,7 +60,7 @@ class SortEngine:
         for name in ordered_names:
             nodes = grouped.pop(name, [])
             list_rule = rule.lists.get(name)
-            if list_rule and all(node.value is not None for node in nodes):
+            if list_rule and all(node.raw_tail is not None for node in nodes):
                 nodes = self._sort_list(nodes, list_rule)
             for node in nodes:
                 node.children = self._sort_children(
@@ -68,7 +69,12 @@ class SortEngine:
                 )
                 result.append(node)
 
-        for name in sorted(grouped.keys()):
+        # Unknown names: preserve original source order (first appearance)
+        unknown_names = sorted(
+            grouped.keys(),
+            key=lambda n: min(c.source_index for c in grouped[n])
+        )
+        for name in unknown_names:
             if name in ordered_set:
                 continue
             for node in grouped[name]:
@@ -84,11 +90,16 @@ class SortEngine:
         names_set = set(names)
         ordered: list[str] = [name for name in rule.child_order if name in names_set]
         ordered_set = set(ordered)
-        remaining = sorted(name for name in names_set if name not in ordered_set)
+        # For names not explicitly ordered by schema, we will handle order preservation
+        # in _sort_children by sorting unknown names by source_index.
+        remaining = [n for n in names if n not in ordered_set]
         return ordered + remaining
 
     def _sort_list(self, nodes: list[ConfigNode], list_rule) -> list[ConfigNode]:
-        if list_rule.ordered_by == "user":
+        # Default to preserving source order (user order) unless the schema
+        # explicitly wants a key-based sort. This makes jsmerge sort idempotent
+        # on already-canonical "show configuration" output.
+        if list_rule.ordered_by == "user" or not list_rule.keys:
             return sorted(nodes, key=lambda n: n.source_index)
         return sorted(
             nodes,

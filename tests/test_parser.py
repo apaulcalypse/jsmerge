@@ -19,7 +19,7 @@ def test_parse_interfaces_and_comments():
     assert ge.name == "ge-0/0/0"
     assert ge.children[0].comments == ["JIRA-99"]
     assert ge.children[0].name == "description"
-    assert ge.children[0].value == "test"
+    assert ge.children[0].value == '"test"'
 
 
 def test_parse_inactive():

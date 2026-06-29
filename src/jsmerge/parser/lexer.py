@@ -33,12 +33,18 @@ class LexError(Exception):
         self.column = column
 
 
-def _is_ident_start(ch: str) -> bool:
-    return ch.isalnum() or ch in "_"
+def _is_value_atom_char(ch: str) -> bool:
+    """Characters allowed inside unquoted value atoms (identifiers, paths, wildcards, etc.).
+
+    This is intentionally broad so that real Junos "show configuration" output
+    (with <*>, ::/0, .*FOO.*, /junos/..., prefix-length-range, etc.) parses
+    without constant per-character whack-a-mole.
+    """
+    return not ch.isspace() and ch not in '{ };"'
 
 
-def _is_ident_part(ch: str) -> bool:
-    return ch.isalnum() or ch in "-_./:@[]"
+
+
 
 
 def tokenize(text: str) -> list[Token]:
@@ -103,21 +109,12 @@ def tokenize(text: str) -> list[Token]:
             emit(TokenKind.COMMENT, "".join(body).strip(), start_line, start_col)
             continue
 
-        # Standalone prefix length in route-filters: "upto /24", "through /32"
-        if ch == "/" and peek(1).isdigit():
-            start = i
-            advance()
-            while i < length and (text[i].isdigit() or text[i] == "."):
-                advance()
-            emit(TokenKind.IDENT, text[start:i], start_line, start_col)
-            continue
-
         if ch == '"':
             advance()
             body = []
             while i < length:
                 if text[i] == "\\" and i + 1 < length:
-                    body.append(text[i + 1])
+                    body.append(text[i : i + 2])
                     advance(2)
                     continue
                 if text[i] == '"':
@@ -130,10 +127,10 @@ def tokenize(text: str) -> list[Token]:
             emit(TokenKind.STRING, "".join(body), start_line, start_col)
             continue
 
-        if _is_ident_start(ch):
+        if _is_value_atom_char(ch):
             start = i
             advance()
-            while i < length and _is_ident_part(text[i]):
+            while i < length and _is_value_atom_char(text[i]):
                 advance()
             ident = text[start:i]
             if ident in ("inactive:", "inactive") and (ident == "inactive:" or peek() == ":"):

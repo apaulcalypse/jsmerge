@@ -7,6 +7,7 @@ from jsmerge.models import ConfigNode
 INDENT = "    "
 
 
+
 def render_config(
     root: ConfigNode,
     *,
@@ -38,24 +39,12 @@ def _render_node(
     for comment in node.comments:
         lines.append(f"{indent}/* {comment} */")
 
-    if node.is_leaf():
-        lines.append(f"{indent}{prefix}{node.name} {node.value};")
-        return
-
-    if node.value is not None:
-        if node.children:
-            lines.append(f"{indent}{prefix}{node.name} {node.value} {{")
-            for child in node.children:
-                _render_node(child, depth + 1, lines, blank_between_top_level=False)
-            lines.append(f"{indent}}}")
-        else:
-            lines.append(f"{indent}{prefix}{node.name} {node.value};")
-        return
+    tail = " " + " ".join(node.raw_tail) if node.raw_tail else ""
 
     if node.children:
-        lines.append(f"{indent}{prefix}{node.name} {{")
+        lines.append(f"{indent}{prefix}{node.name}{tail} {{")
         for child in node.children:
             _render_node(child, depth + 1, lines, blank_between_top_level=False)
         lines.append(f"{indent}}}")
     else:
-        lines.append(f"{indent}{prefix}{node.name};")
+        lines.append(f"{indent}{prefix}{node.name}{tail};")

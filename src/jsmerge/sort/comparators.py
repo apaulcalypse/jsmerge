@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from functools import cmp_to_key
 
@@ -9,7 +10,7 @@ from jsmerge.models import ConfigNode
 
 _INTERFACE_RE = re.compile(
     r"^(?P<type>[a-z]+(?:-[a-z]+)*)"
-    r"(?:-(?P<fpc>\d+)/(?P<pic>\d+)/(?P<port>\d+)(?:\.(?P<subport>\d+))?)?"
+    r"(?:-(?P<fpc>\d+)/(?P<pic>\d+)/(?P<port>\d+)(?:[.:](?P<subport>\d+))?)?"
     r"$",
     re.IGNORECASE,
 )
@@ -63,13 +64,39 @@ def compare_lexicographic(a: str | None, b: str | None) -> int:
     return 0
 
 
+def compare_prefix(a: str | None, b: str | None) -> int:
+    """Compare IP prefixes numerically (network address first, then prefix length)."""
+    def key(p: str | None):
+        if not p:
+            return (0, 0, "")
+        try:
+            net = ipaddress.ip_network(p, strict=False)
+            return (int(net.network_address), net.prefixlen, p)
+        except ValueError:
+            return (0, 0, p.lower())
+
+    left, right = key(a), key(b)
+    if left < right:
+        return -1
+    if left > right:
+        return 1
+    return 0
+
+
+def _primary_value(node: ConfigNode) -> str:
+    if node.value is not None:
+        return node.value
+    if node.raw_tail:
+        return node.raw_tail[0]
+    return ""
+
 def extract_list_key(node: ConfigNode, keys: list[str]) -> tuple[str, ...]:
     if len(keys) == 1 and keys[0] == "name":
-        return (node.value or "",)
+        return (_primary_value(node),)
     values: list[str] = []
     for key in keys:
         if key == "name":
-            values.append(node.value or "")
+            values.append(_primary_value(node))
             continue
         child = next((c for c in node.children if c.name == key and c.value is not None), None)
         values.append(child.value if child else "")
@@ -78,11 +105,13 @@ def extract_list_key(node: ConfigNode, keys: list[str]) -> tuple[str, ...]:
 
 def compare_nodes(a: ConfigNode, b: ConfigNode, keys: list[str], comparator: str) -> int:
     if comparator == "interface":
-        return compare_interface(a.value, b.value)
+        return compare_interface(_primary_value(a), _primary_value(b))
     if comparator == "numeric":
-        return compare_numeric(a.value, b.value)
+        return compare_numeric(_primary_value(a), _primary_value(b))
+    if comparator == "prefix" or a.name == "prefix-list-item":
+        return compare_prefix(_primary_value(a), _primary_value(b))
     if len(keys) == 1:
-        return compare_lexicographic(a.value, b.value)
+        return compare_lexicographic(_primary_value(a), _primary_value(b))
     left = extract_list_key(a, keys)
     right = extract_list_key(b, keys)
     if left < right:

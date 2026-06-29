@@ -28,11 +28,11 @@ def _normalize_node(node: ConfigNode, parent: ConfigNode | None) -> None:
         for child in node.children:
             if child.name == "interface":
                 normalized.append(child)
-            elif child.value is None and _INTERFACE_NAME.match(child.name):
+            elif child.raw_tail is None and _INTERFACE_NAME.match(child.name):
                 normalized.append(
                     ConfigNode(
                         name="interface",
-                        value=child.name,
+                        raw_tail=[child.name],
                         children=child.children,
                         props=dict(child.props),
                         flags=set(child.flags),
@@ -53,7 +53,7 @@ def _normalize_node(node: ConfigNode, parent: ConfigNode | None) -> None:
                 normalized_items.append(
                     ConfigNode(
                         name="prefix-list-item",
-                        value=child.name,
+                        raw_tail=[child.name],
                         source_index=child.source_index,
                         comments=list(child.comments),
                     )
@@ -67,13 +67,13 @@ def _normalize_node(node: ConfigNode, parent: ConfigNode | None) -> None:
 
 
 def _denormalize_node(node: ConfigNode, parent: ConfigNode | None) -> None:
-    if parent is not None and parent.name == "interfaces" and node.name == "interface" and node.value:
-        node.name = node.value
-        node.value = None
+    if parent is not None and parent.name == "interfaces" and node.name == "interface" and node.raw_tail:
+        node.name = node.raw_tail[0]
+        node.raw_tail = None
 
-    if parent is not None and parent.name == "prefix-list" and node.name == "prefix-list-item" and node.value:
-        node.name = node.value
-        node.value = None
+    if parent is not None and parent.name == "prefix-list" and node.name == "prefix-list-item" and node.raw_tail:
+        node.name = node.raw_tail[0]
+        node.raw_tail = None
 
     for child in list(node.children):
         _denormalize_node(child, node)

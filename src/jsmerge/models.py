@@ -10,20 +10,27 @@ class ConfigNode:
     """One node in a Junos configuration hierarchy."""
 
     name: str
-    value: str | None = None
+    raw_tail: list[str] | None = None   # raw tokens after the statement name (primary representation)
     props: dict[str, str] = field(default_factory=dict)
     flags: set[str] = field(default_factory=set)
     children: list[ConfigNode] = field(default_factory=list)
     source_index: int = 0
     comments: list[str] = field(default_factory=list)
 
-    def path_key(self) -> tuple[str, str | None]:
-        return (self.name, self.value)
+    @property
+    def value(self) -> str | None:
+        """Legacy view: joined raw_tail tokens (for single or multi-part statements)."""
+        if self.raw_tail:
+            return " ".join(self.raw_tail)
+        return None
+
+    def path_key(self) -> tuple[str, tuple[str, ...] | None]:
+        return (self.name, tuple(self.raw_tail) if self.raw_tail else None)
 
     def clone(self) -> ConfigNode:
         return ConfigNode(
             name=self.name,
-            value=self.value,
+            raw_tail=list(self.raw_tail) if self.raw_tail else None,
             props=dict(self.props),
             flags=set(self.flags),
             children=[child.clone() for child in self.children],
@@ -32,7 +39,7 @@ class ConfigNode:
         )
 
     def is_container(self) -> bool:
-        return self.value is None and bool(self.children)
+        return (self.raw_tail is None or len(self.raw_tail) != 1) and bool(self.children)
 
     def is_leaf(self) -> bool:
-        return self.value is not None and not self.children
+        return self.raw_tail is not None and not self.children

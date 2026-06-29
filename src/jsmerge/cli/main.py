@@ -16,6 +16,7 @@ from jsmerge.progress import NullProgress, TerminalProgress
 from jsmerge.schema.build import build_schema_from_release
 from jsmerge.schema.loader import load_schema_index, release_schema_memory_cache, resolve_schema_path
 from jsmerge.sort import SortEngine
+from jsmerge.sort.ordering import apply_top_level_order, CLI_TOP_LEVEL_ORDER
 
 app = typer.Typer(
     name="jsmerge",
@@ -41,8 +42,8 @@ def _read_input(path: Path | None) -> str:
 
 def _config_version(root) -> str | None:
     for child in root.children:
-        if child.name == "version" and child.value:
-            return child.value
+        if child.name == "version" and child.raw_tail:
+            return child.raw_tail[0]
     return None
 
 
@@ -51,6 +52,7 @@ def sort_command(
     input: Path = typer.Argument(..., help="Input config file, or - for stdin."),
     output: Optional[Path] = typer.Option(None, "-o", "--output", help="Output file (default: stdout)."),
     schema: str = typer.Option("auto", "--schema", help="Schema bundle name/path, or 'auto'."),
+    order: str = typer.Option("cli", "--order", help="Top-level ordering strategy: cli (recommended), yang, or source."),
     strict: bool = typer.Option(False, "--strict", help="Error on unknown schema paths."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
 ) -> None:
@@ -69,6 +71,9 @@ def sort_command(
     index = load_schema_index(schema_path)
     engine = SortEngine(index, strict=strict)
     sorted_root = denormalize_tree(engine.sort(root))
+
+    apply_top_level_order(sorted_root, order)
+
     rendered = render_config(sorted_root)
 
     if output:

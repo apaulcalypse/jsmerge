@@ -62,30 +62,43 @@ class _Parser:
                 node.flags.add("inactive")
             parent.children.append(node)
 
-    def _parse_value(self) -> str | None:
-        """Parse one or more value tokens before ``;`` or ``{``."""
-        if not (self.at(TokenKind.STRING) or self.at(TokenKind.IDENT)):
+    def _parse_raw_tail(self) -> list[str] | None:
+        """Collect everything after the statement name as raw tokens.
+
+        Single simple values become a 1-element list.
+        Multi-part statements (as-path NAME "regex", etc.) become multi-element lists.
+        This is the only value-parsing path — no more joining + re-quoting logic.
+        """
+        structural = {TokenKind.SEMICOLON, TokenKind.LBRACE, TokenKind.RBRACE, TokenKind.EOF}
+        if self.current().kind in structural:
             return None
-        parts: list[str] = []
-        while self.at(TokenKind.STRING) or self.at(TokenKind.IDENT):
-            parts.append(self.advance().value)
-        return " ".join(parts)
+
+        tail: list[str] = []
+        while self.current().kind not in structural:
+            tok = self.advance()
+            if tok.kind == TokenKind.STRING:
+                tail.append(f'"{tok.value}"')
+            elif tok.kind == TokenKind.COMMENT:
+                tail.append(f"/* {tok.value} */")
+            else:
+                tail.append(tok.value)
+        return tail if tail else None
 
     def parse_statement(self) -> ConfigNode:
         name_token = self.match(TokenKind.IDENT)
         name = name_token.value
         source_index = self.next_source_index()
 
-        value = self._parse_value()
-        if value is not None:
+        raw_tail = self._parse_raw_tail()
+        if raw_tail is not None:
             if self.at(TokenKind.LBRACE):
                 self.match(TokenKind.LBRACE)
-                node = ConfigNode(name=name, value=value, source_index=source_index)
+                node = ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
                 self.parse_statements(node)
                 self.match(TokenKind.RBRACE)
                 return node
             self.match(TokenKind.SEMICOLON)
-            return ConfigNode(name=name, value=value, source_index=source_index)
+            return ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
 
         if self.at(TokenKind.LBRACE):
             self.match(TokenKind.LBRACE)
