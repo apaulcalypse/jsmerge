@@ -12,6 +12,8 @@ class TokenKind(Enum):
     RBRACE = auto()
     SEMICOLON = auto()
     INACTIVE = auto()
+    REPLACE = auto()
+    SECRET = auto()
     IDENT = auto()
     STRING = auto()
     COMMENT = auto()
@@ -96,9 +98,7 @@ def tokenize(text: str) -> list[Token]:
             continue
 
         if ch == "#" and peek(1) == "#":
-            # Skip "## SECRET-DATA" annotations (Junos emits them after secrets).
-            # This prevents them from becoming stray IDENT tokens or triggering
-            # "Expected IDENT got RBRACE" when they appear before a closing brace.
+            # Emit a SECRET token for "## SECRET-DATA" (preserved for round-trip diffs).
             advance(2)
             while i < length and text[i].isspace():
                 advance()
@@ -108,6 +108,7 @@ def tokenize(text: str) -> list[Token]:
                     advance()
                 if i < length and text[i] == ";":
                     advance()
+            emit(TokenKind.SECRET, "SECRET-DATA", start_line, start_col)
             continue
 
         if ch == "/" and peek(1) == "*":
@@ -155,7 +156,7 @@ def tokenize(text: str) -> list[Token]:
             elif ident in ("replace:", "replace") and (ident == "replace:" or peek() == ":"):
                 if ident == "replace":
                     advance()
-                emit(TokenKind.INACTIVE, "replace:", start_line, start_col)  # reuse INACTIVE token for now; parser will distinguish by value
+                emit(TokenKind.REPLACE, "replace:", start_line, start_col)
             else:
                 emit(TokenKind.IDENT, ident, start_line, start_col)
             continue

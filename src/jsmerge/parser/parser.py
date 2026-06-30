@@ -48,24 +48,31 @@ class _Parser:
         self.source_counter += 1
         return self.source_counter
 
+    def _parse_prefixed_name(self) -> tuple[str, bool, bool]:
+        """Consume optional inactive:/replace: prefix and return (real_name, inactive, replace)."""
+        inactive = False
+        replace = False
+        if self.at(TokenKind.INACTIVE):
+            self.advance()
+            inactive = True
+        elif self.at(TokenKind.REPLACE):
+            self.advance()
+            replace = True
+        name_token = self.match(TokenKind.IDENT)
+        return name_token.value, inactive, replace
+
     def parse_statements(self, parent: ConfigNode) -> None:
         while not self.at(TokenKind.RBRACE) and not self.at(TokenKind.EOF):
             comments = self.consume_comments()
-            inactive = False
-            replace = False
-            if self.at(TokenKind.INACTIVE):
-                tok = self.advance()
-                if tok.value == "replace:":
-                    replace = True
-                else:
-                    inactive = True
+            # Skip stray SECRET tokens that can appear after a ; on the prior line
+            while self.at(TokenKind.SECRET):
+                self.advance()
+            # After eating trailing comments/SECRETs we may now be at the closer
+            if self.at(TokenKind.RBRACE) or self.at(TokenKind.EOF):
+                break
             node = self.parse_statement()
             if comments:
                 node.comments = comments
-            if inactive:
-                node.flags.add("inactive")
-            if replace:
-                node.flags.add("replace")
             parent.children.append(node)
 
     def _parse_raw_tail(self) -> list[str] | None:
@@ -75,7 +82,7 @@ class _Parser:
         Multi-part statements (as-path NAME "regex", etc.) become multi-element lists.
         This is the only value-parsing path — no more joining + re-quoting logic.
         """
-        structural = {TokenKind.SEMICOLON, TokenKind.LBRACE, TokenKind.RBRACE, TokenKind.EOF}
+        structural = {TokenKind.SEMICOLON, TokenKind.LBRACE, TokenKind.RBRACE, TokenKind.EOF, TokenKind.SECRET}
         if self.current().kind in structural:
             return None
 
@@ -88,16 +95,10 @@ class _Parser:
                 tail.append(f"/* {tok.value} */")
             else:
                 tail.append(tok.value)
-        # Handle "## SECRET-DATA" suffix (common on encrypted values) even if ; is absent before }.
-        if len(tail) >= 2 and tail[-2] == "##" and tail[-1] == "SECRET-DATA":
-            tail = tail[:-2]
-            # Caller will see the flag via a side-channel; for now we just avoid the parse error.
-            # (A future change can surface this as node.flags.add("secret-data").)
         return tail if tail else None
 
     def parse_statement(self) -> ConfigNode:
-        name_token = self.match(TokenKind.IDENT)
-        name = name_token.value
+        name, inactive, replace = self._parse_prefixed_name()
         source_index = self.next_source_index()
 
         raw_tail = self._parse_raw_tail()
@@ -107,38 +108,60 @@ class _Parser:
                 node = ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
                 self.parse_statements(node)
                 self.match(TokenKind.RBRACE)
+                if self.at(TokenKind.SECRET):
+                    self.advance()
+                    node.flags.add("secret-data")
+                if inactive:
+                    node.flags.add("inactive")
+                if replace:
+                    node.flags.add("replace")
                 return node
             if self.at(TokenKind.SEMICOLON):
                 self.match(TokenKind.SEMICOLON)
-                if self.at(TokenKind.IDENT) and self.current().value == "##":
-                    self.advance()
-                    if self.at(TokenKind.IDENT) and self.current().value == "SECRET-DATA":
-                        self.advance()
-                        node = ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
-                        node.flags.add("secret-data")
-                        return node
-            # else: tolerate missing ; before }/EOF (e.g. SECRET-DATA lines from some generators)
-            return ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
+            if self.at(TokenKind.SECRET):
+                self.advance()
+                node = ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
+                node.flags.add("secret-data")
+                if inactive:
+                    node.flags.add("inactive")
+                if replace:
+                    node.flags.add("replace")
+                return node
+            node = ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
+            if inactive:
+                node.flags.add("inactive")
+            if replace:
+                node.flags.add("replace")
+            return node
 
         if self.at(TokenKind.LBRACE):
             self.match(TokenKind.LBRACE)
             node = ConfigNode(name=name, source_index=source_index)
             self.parse_statements(node)
             self.match(TokenKind.RBRACE)
+            if inactive:
+                node.flags.add("inactive")
+            if replace:
+                node.flags.add("replace")
             return node
 
         if self.at(TokenKind.SEMICOLON):
             self.match(TokenKind.SEMICOLON)
-            # Handle trailing "## SECRET-DATA" annotation (common on encrypted-password)
-            if self.at(TokenKind.IDENT) and self.current().value == "##":
-                self.advance()
-                if self.at(TokenKind.IDENT) and self.current().value == "SECRET-DATA":
-                    self.advance()
-                    node = ConfigNode(name=name, source_index=source_index)
-                    node.flags.add("secret-data")
-                    return node
-        # else: tolerate missing ; before }/EOF
-        return ConfigNode(name=name, source_index=source_index)
+        if self.at(TokenKind.SECRET):
+            self.advance()
+            node = ConfigNode(name=name, source_index=source_index)
+            node.flags.add("secret-data")
+            if inactive:
+                node.flags.add("inactive")
+            if replace:
+                node.flags.add("replace")
+            return node
+        node = ConfigNode(name=name, source_index=source_index)
+        if inactive:
+            node.flags.add("inactive")
+        if replace:
+            node.flags.add("replace")
+        return node
 
 
 def parse_config(text: str) -> ConfigNode:
