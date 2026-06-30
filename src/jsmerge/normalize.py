@@ -13,6 +13,7 @@ _BARE_PREFIX = re.compile(r"^\d+\.\d+")
 def normalize_tree(root: ConfigNode) -> ConfigNode:
     node = root.clone()
     _normalize_node(node, parent=None)
+    coalesce_duplicate_containers(node)
     return node
 
 
@@ -77,3 +78,39 @@ def _denormalize_node(node: ConfigNode, parent: ConfigNode | None) -> None:
 
     for child in list(node.children):
         _denormalize_node(child, node)
+
+
+def coalesce_duplicate_containers(node: ConfigNode) -> None:
+    """In-place coalescing of duplicate sibling containers (e.g. multiple 'groups {}' blocks).
+
+    When the same container name (+ raw_tail) appears multiple times at the same level,
+    their children are merged into the first occurrence. This handles config generators
+    that import many Jinja2 templates, each contributing fragments to the same top-level
+    stanza (common with 'groups', 'interfaces', 'policy-options', etc.).
+    """
+    if not node.children:
+        return
+
+    # Group children by their identity key, preserving first-seen order
+    seen: dict[tuple, ConfigNode] = {}
+    new_children: list[ConfigNode] = []
+
+    for child in node.children:
+        key = child.path_key()
+        if key in seen:
+            existing = seen[key]
+            # Merge children from the duplicate into the first one
+            for sub in child.children:
+                existing.children.append(sub)
+            # Also carry over any comments/flags from duplicates
+            existing.comments.extend(child.comments)
+            existing.flags.update(child.flags)
+        else:
+            seen[key] = child
+            new_children.append(child)
+
+    node.children = new_children
+
+    # Recurse so nested duplicates are also handled
+    for child in node.children:
+        coalesce_duplicate_containers(child)

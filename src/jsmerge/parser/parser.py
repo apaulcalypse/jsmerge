@@ -52,14 +52,20 @@ class _Parser:
         while not self.at(TokenKind.RBRACE) and not self.at(TokenKind.EOF):
             comments = self.consume_comments()
             inactive = False
+            replace = False
             if self.at(TokenKind.INACTIVE):
-                self.advance()
-                inactive = True
+                tok = self.advance()
+                if tok.value == "replace:":
+                    replace = True
+                else:
+                    inactive = True
             node = self.parse_statement()
             if comments:
                 node.comments = comments
             if inactive:
                 node.flags.add("inactive")
+            if replace:
+                node.flags.add("replace")
             parent.children.append(node)
 
     def _parse_raw_tail(self) -> list[str] | None:
@@ -82,6 +88,11 @@ class _Parser:
                 tail.append(f"/* {tok.value} */")
             else:
                 tail.append(tok.value)
+        # Handle "## SECRET-DATA" suffix (common on encrypted values) even if ; is absent before }.
+        if len(tail) >= 2 and tail[-2] == "##" and tail[-1] == "SECRET-DATA":
+            tail = tail[:-2]
+            # Caller will see the flag via a side-channel; for now we just avoid the parse error.
+            # (A future change can surface this as node.flags.add("secret-data").)
         return tail if tail else None
 
     def parse_statement(self) -> ConfigNode:
@@ -97,7 +108,16 @@ class _Parser:
                 self.parse_statements(node)
                 self.match(TokenKind.RBRACE)
                 return node
-            self.match(TokenKind.SEMICOLON)
+            if self.at(TokenKind.SEMICOLON):
+                self.match(TokenKind.SEMICOLON)
+                if self.at(TokenKind.IDENT) and self.current().value == "##":
+                    self.advance()
+                    if self.at(TokenKind.IDENT) and self.current().value == "SECRET-DATA":
+                        self.advance()
+                        node = ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
+                        node.flags.add("secret-data")
+                        return node
+            # else: tolerate missing ; before }/EOF (e.g. SECRET-DATA lines from some generators)
             return ConfigNode(name=name, raw_tail=raw_tail, source_index=source_index)
 
         if self.at(TokenKind.LBRACE):
@@ -107,7 +127,17 @@ class _Parser:
             self.match(TokenKind.RBRACE)
             return node
 
-        self.match(TokenKind.SEMICOLON)
+        if self.at(TokenKind.SEMICOLON):
+            self.match(TokenKind.SEMICOLON)
+            # Handle trailing "## SECRET-DATA" annotation (common on encrypted-password)
+            if self.at(TokenKind.IDENT) and self.current().value == "##":
+                self.advance()
+                if self.at(TokenKind.IDENT) and self.current().value == "SECRET-DATA":
+                    self.advance()
+                    node = ConfigNode(name=name, source_index=source_index)
+                    node.flags.add("secret-data")
+                    return node
+        # else: tolerate missing ; before }/EOF
         return ConfigNode(name=name, source_index=source_index)
 
 

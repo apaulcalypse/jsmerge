@@ -95,6 +95,21 @@ def tokenize(text: str) -> list[Token]:
             advance()
             continue
 
+        if ch == "#" and peek(1) == "#":
+            # Skip "## SECRET-DATA" annotations (Junos emits them after secrets).
+            # This prevents them from becoming stray IDENT tokens or triggering
+            # "Expected IDENT got RBRACE" when they appear before a closing brace.
+            advance(2)
+            while i < length and text[i].isspace():
+                advance()
+            if text[i:].startswith("SECRET-DATA"):
+                advance(12)
+                while i < length and text[i].isspace():
+                    advance()
+                if i < length and text[i] == ";":
+                    advance()
+            continue
+
         if ch == "/" and peek(1) == "*":
             advance(2)
             body: list[str] = []
@@ -137,6 +152,10 @@ def tokenize(text: str) -> list[Token]:
                 if ident == "inactive":
                     advance()
                 emit(TokenKind.INACTIVE, "inactive:", start_line, start_col)
+            elif ident in ("replace:", "replace") and (ident == "replace:" or peek() == ":"):
+                if ident == "replace":
+                    advance()
+                emit(TokenKind.INACTIVE, "replace:", start_line, start_col)  # reuse INACTIVE token for now; parser will distinguish by value
             else:
                 emit(TokenKind.IDENT, ident, start_line, start_col)
             continue

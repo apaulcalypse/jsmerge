@@ -34,7 +34,11 @@ def _render_node(
     blank_between_top_level: bool,
 ) -> None:
     indent = INDENT * depth
-    prefix = "inactive: " if "inactive" in node.flags else ""
+    prefix = ""
+    if "replace" in node.flags:
+        prefix = "replace: "
+    elif "inactive" in node.flags:
+        prefix = "inactive: "
 
     for comment in node.comments:
         lines.append(f"{indent}/* {comment} */")
@@ -47,4 +51,5 @@ def _render_node(
             _render_node(child, depth + 1, lines, blank_between_top_level=False)
         lines.append(f"{indent}}}")
     else:
-        lines.append(f"{indent}{prefix}{node.name}{tail};")
+        secret = " ## SECRET-DATA" if "secret-data" in node.flags else ""
+        lines.append(f"{indent}{prefix}{node.name}{tail};{secret}")

@@ -27,6 +27,7 @@ fast = [
 
 [project.scripts]
 jsmerge = "jsmerge.cli.main:app"
+ncs-drift = "jsmerge.cli.ncs_drift:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jsmerge"]

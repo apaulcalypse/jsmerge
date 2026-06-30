@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jsmerge.filter import filter_config, strip_comments as do_strip_comments, strip_replace as do_strip_replace
 from jsmerge.normalize import denormalize_tree, normalize_tree
 from jsmerge.parser import parse_config
 from jsmerge.render import render_config
@@ -19,9 +20,22 @@ def sort_config(
     schema_dir: Path | None = None,
     strict: bool = False,
     order: str = "cli",
+    filters: list[str] | None = None,
+    strip_comments: bool = False,
+    strip_replace: bool = False,
 ) -> str:
-    """Parse, normalize, sort, and render a Junos configuration."""
+    """Parse, normalize, sort, and render a Junos configuration.
+
+    If filters are provided, only the first matching subtree for each filter
+    is kept (output remains a valid full configuration).
+    """
     root = normalize_tree(parse_config(text))
+    if filters:
+        root = filter_config(root, filters)
+    if strip_comments:
+        root = do_strip_comments(root)
+    if strip_replace:
+        root = do_strip_replace(root)
     config_version = next(
         (child.raw_tail[0] for child in root.children if child.name == "version" and child.raw_tail),
         None,

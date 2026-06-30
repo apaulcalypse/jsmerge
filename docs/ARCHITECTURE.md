@@ -41,6 +41,11 @@ Junos configuration display order comes from three regimes. [Juniper's published
 
 **What we do not reorder:** Any list marked `ordered-by user`. Sorting these alphabetically would change device behavior and would not match the router.
 
+**Top-level ordering (`--order`):**  
+Real `show configuration` output does not follow the strict YANG `child_order` at the root. Therefore jsmerge defaults to `--order cli`, which uses a stable, observed order that closely matches what routers actually emit (`version → groups → apply-groups → system → chassis → services → security → interfaces → …`).  
+`--order yang` restores the old strict YANG behavior.  
+`--order source` preserves the input order for top-level statements (useful when the input is already in the desired sequence).
+
 ---
 
 ## High-Level Architecture
@@ -99,14 +104,24 @@ Parsed representation of one node in the config hierarchy.
 ```python
 @dataclass
 class ConfigNode:
-    name: str                          # "interfaces", "term", "family"
-    value: str | None = None           # identifier: "ge-0/0/0", "ACCEPT-LOCAL"
+    name: str
+    raw_tail: list[str] | None = None   # raw tokens after the statement name (primary representation)
     props: dict[str, str] = field(default_factory=dict)
-    flags: set[str] = field(default_factory=set)  # "inactive", "protect", …
+    flags: set[str] = field(default_factory=set)
     children: list[ConfigNode] = field(default_factory=list)
-    source_index: int = 0              # original position; used for user-ordered lists
-    comments: list[str] = field(default_factory=list)  # block comments attached to this node
+    source_index: int = 0
+    comments: list[str] = field(default_factory=list)
+
+    @property
+    def value(self) -> str | None:
+        """Legacy view: first element of raw_tail when it has exactly one item."""
+        if self.raw_tail and len(self.raw_tail) == 1:
+            return self.raw_tail[0]
+        return None
 ```
+
+**Design note on values:**
+Instead of storing a single `value` string (and guessing when to add/remove quotes), nodes store `raw_tail: list[str]`. Multi-part statements (e.g. `as-path NAME "regex"`, `route-filter X/Y/Z upto /24`) keep their tokens exactly as parsed. The renderer simply emits `" ".join(raw_tail)`. This eliminates an entire class of quoting/escaping bugs and makes round-tripping of real `show configuration` output reliable.
 
 **Parser responsibilities:**
 
@@ -140,7 +155,7 @@ Pre-compiled ordering rules, loaded from JSON at runtime.
 class ListRule:
     ordered_by: Literal["user", "system"]
     keys: list[str]                    # ["name"] or compound keys
-    comparator: str = "default"        # "default" | "interface" | "ip_prefix" | …
+    comparator: str = "default"        # "default" | "interface" | "prefix" | "numeric"
 
 @dataclass
 class NodeRule:
@@ -443,6 +458,54 @@ At each path:
 | System-ordered list | Index by key; merge matching entries recursively; add new keys |
 | User-ordered list | Apply selected strategy |
 
+### 4.5 Reverse Merge / Drift Extraction (first-class feature)
+
+**Purpose:** Given a clean generated baseline and a live router config (with drift, cruft, and tactical overrides), emit a minimal, mergeable Junos config fragment containing *only* the differences. This fragment can be stored alongside the generated config and merged at render time, giving a clear, auditable view of all non-standard configuration.
+
+**Default behavior:** `--include-comments` (comments from the live side are preserved on differing nodes so the "why" travels with the override).
+
+**Typical usage:**
+
+```bash
+jsmerge reverse-merge \
+  --base generated.conf \
+  --live $(ssh router 'show configuration') \
+  -o overrides.conf
+```
+
+The resulting `overrides.conf` is then part of the normal merge pipeline:
+
+```bash
+jsmerge merge --manifest merge.yaml -o final.conf   # merge.yaml includes overrides.conf
+```
+
+**Algorithm sketch (reuses MergeEngine + new diff primitives):**
+
+```
+reverse_merge(base, live) -> delta:
+    base_tree = sort(parse(base))
+    live_tree = sort(parse(live))
+    delta = diff_trees(base_tree, live_tree)   # returns ConfigNode subtree of changes only
+    # For each differing path:
+    #   - scalar leaf differs → emit the live value (with comment if present)
+    #   - container differs → emit only the changed subtree
+    #   - system list: emit only added/changed/deleted keyed entries
+    #   - user-ordered list: emit whole differing block (order is semantic)
+    #   - presence-only nodes (e.g. "inactive: foo;") → emit with flag
+    return render(delta, include_comments=True)
+```
+
+**Key behaviors & edge cases:**
+
+- Comments from live are attached to the delta nodes by default.
+- Deletions on-box (statements present in base but absent in live) are expressed either as `delete` statements or as absence in the overlay (depending on strategy flag).
+- User-ordered lists (terms, route-filters) are emitted in full when they differ — partial term diffs are not attempted.
+- Unknown schema paths fall back to alphabetical; warnings emitted unless `--strict`.
+- The delta is always rendered through the normal SortEngine so it is in canonical order and ready to merge.
+- Reverse-merge output is a valid input to the normal `merge` command (overlay strategy).
+
+This makes reverse-merge the "generate the tactical layer" companion to the normal merge flow.
+
 ### 5. Renderer (`jsmerge.render`)
 
 Walk sorted `ConfigNode` tree → emit curly-brace text.
@@ -501,6 +564,7 @@ jsmerge sort candidate.conf | diff - router-show.conf
 | `--schema <version\|auto>` | Select schema bundle; `auto` reads `version` from config or falls back to latest EVO |
 | `--output-format <hierarchical\|set>` | Render as curly-brace or `set` lines |
 | `--strict` | Error on unknown schema paths |
+|| `--order cli|yang|source` | Top-level ordering strategy (`cli` is default) |
 | `--verbose` | Log comparator fallbacks, schema misses, and auto-resolution choice |
 
 ---
@@ -618,26 +682,29 @@ Same config sorted against two schema versions; document and test expected diffe
 
 **Exit criteria:** `sort(shuffle(router_dump)) == router_dump` for at least one real device capture covering interfaces, policies, and filters.
 
-### Phase 2 — Merge + set/delete format
+### Phase 2 — Merge + set/delete format + Reverse Merge
 
-- [ ] Partition merge (YAML manifest)
 - [ ] Overlay merge with conflict reporting
 - [ ] User-ordered list merge strategies
 - [ ] Set/delete format parser and renderer
-- [ ] Comment preservation through merge
+- [ ] Comment preservation through merge (default: `--include-comments`)
 - [ ] `jsmerge merge` CLI
+- [ ] `jsmerge reverse-merge` (first-class): generated + live → minimal overrides config
+- [ ] Tree-diff primitives usable by both merge and reverse-merge flows
 
-### Phase 3 — Full schema coverage
+### Phase 3 — Full schema coverage + Partition merge
 
+- [ ] Partition merge (YAML manifest)
 - [ ] Schema builder for all `junos-conf-*.yang` modules (EVO and classic bundles)
 - [ ] `logical-systems`, `routing-instances`, `groups`
 - [ ] `inactive:` / `apply-groups` / `replace:` full fidelity
 
 ### Phase 4 — Diff integration
 
-- [ ] `jsmerge diff` operating on sorted trees
+- [ ] `jsmerge diff` operating on sorted trees (traditional structural/line diff)
 - [ ] Order-sensitive section handling (policy/firewall terms)
 - [ ] Optional integration with external tools (e.g. diffnc-style output)
+- [ ] Reverse-merge output usable as the "actionable patch" form of a diff
 
 ---
 
