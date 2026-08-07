@@ -9,17 +9,18 @@ from typing import Optional
 
 import typer
 
+from jsmerge.filter import filter_config, strip_comments as do_strip_comments, strip_replace as do_strip_replace
+from jsmerge.merge import MergeEngine, reverse_merge
+from jsmerge.models import ConfigNode
 from jsmerge.normalize import denormalize_tree, normalize_tree
 from jsmerge.parser import parse_config
-from jsmerge.render import render_config
+from jsmerge.parser.set_parser import parse_set_config
 from jsmerge.progress import NullProgress, TerminalProgress
+from jsmerge.render import render_config, render_set
 from jsmerge.schema.build import build_schema_from_release
 from jsmerge.schema.loader import load_schema_index, release_schema_memory_cache, resolve_schema_path
 from jsmerge.sort import SortEngine
-from jsmerge.sort.ordering import apply_top_level_order, CLI_TOP_LEVEL_ORDER
-from jsmerge.merge import MergeEngine, reverse_merge
-from jsmerge.normalize import denormalize_tree, normalize_tree
-from jsmerge.filter import filter_config, strip_comments as do_strip_comments, strip_replace as do_strip_replace
+from jsmerge.sort.ordering import apply_top_level_order
 
 app = typer.Typer(
     name="jsmerge",
@@ -50,6 +51,14 @@ def _config_version(root) -> str | None:
     return None
 
 
+def _parse_any_config(text: str) -> "ConfigNode":
+    """Auto-detect set vs curly format and return a normalized ConfigNode root."""
+    stripped = text.lstrip()
+    if stripped.startswith("set ") or stripped.startswith("deactivate ") or stripped.startswith("activate "):
+        return normalize_tree(parse_set_config(text))
+    return normalize_tree(parse_config(text))
+
+
 @app.command("sort")
 def sort_command(
     input: Path = typer.Argument(..., help="Input config file, or - for stdin."),
@@ -60,13 +69,14 @@ def sort_command(
     filter: list[str] = typer.Option(None, "--filter", help="Extract only the first matching subtree (repeatable, e.g. --filter groups --filter 'protocols bgp')."),
     strip_comments: bool = typer.Option(False, "--strip-comments", help="Remove all comments from the output."),
     strip_replace: bool = typer.Option(False, "--strip-replace", help="Remove 'replace:' tags from the output."),
+    format: str = typer.Option("curly", "--format", help="Output format: curly (default) or set."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
 ) -> None:
     """Sort a Junos configuration into canonical order."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.WARNING)
 
     text = _read_input(input)
-    root = normalize_tree(parse_config(text))
+    root = _parse_any_config(text)
     config_version = _config_version(root)
     schema_path = resolve_schema_path(schema, config_version=config_version)
     if verbose:
@@ -89,7 +99,7 @@ def sort_command(
 
     apply_top_level_order(sorted_root, order)
 
-    rendered = render_config(sorted_root)
+    rendered = render_set(sorted_root) if format == "set" else render_config(sorted_root)
 
     if output:
         output.write_text(rendered, encoding="utf-8")
@@ -114,7 +124,6 @@ def schema_build_command(
     ),
     github_ref: str = typer.Option("master", "--github-ref", help="Git branch/tag in Juniper/yang."),
     refresh: bool = typer.Option(False, "--refresh", help="Re-download YANG even if cached."),
-    all_modules: bool = typer.Option(False, "--all-modules", help="Include all modules, not only Phase 1 stanzas."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output."),
 ) -> None:
     """Compile YANG modules into a schema ordering index."""
@@ -126,14 +135,10 @@ def schema_build_command(
         platform=platform.value if platform else None,
         github_ref=github_ref,
         force_fetch=refresh,
-        focus_only=not all_modules,
         progress=progress,
     )
     if quiet:
         typer.echo(f"Wrote schema bundle to {output}")
-        cache = output.with_name(output.name + ".cache")
-        if cache.is_file():
-            typer.echo(f"Wrote schema cache to {cache}")
         if yang_dir is None:
             typer.echo(f"YANG modules from GitHub cached at {modules_dir}")
 
@@ -148,6 +153,8 @@ def merge_command(
     filter: list[str] = typer.Option(None, "--filter", help="Extract only the first matching subtree from each input."),
     strip_comments: bool = typer.Option(False, "--strip-comments", help="Remove all comments from the inputs."),
     strip_replace: bool = typer.Option(False, "--strip-replace", help="Remove 'replace:' tags from the inputs."),
+    report_conflicts: bool = typer.Option(False, "--report-conflicts", help="Report when later inputs overwrite values from earlier ones."),
+    format: str = typer.Option("curly", "--format", help="Output format: curly (default) or set."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
 ) -> None:
     """Merge multiple configs using overlay strategy."""
@@ -157,10 +164,10 @@ def merge_command(
     config_version = None
     for inp in inputs:
         text = _read_input(inp)
-        root = normalize_tree(parse_config(text))
+        root = _parse_any_config(text)
         if filter:
             root = filter_config(root, filter)
-        if strip_comments:
+        if strip_comments or not include_comments:
             root = do_strip_comments(root)
         if strip_replace:
             root = do_strip_replace(root)
@@ -172,15 +179,18 @@ def merge_command(
     if verbose:
         typer.echo(f"Using schema: {schema_path}", err=True)
 
-    # For Phase 2 we sort after merge (simple); later use schema for strategies
-    engine = MergeEngine(strict=strict)
-    merged = engine.merge(trees)
-    # sort the result
     index = load_schema_index(schema_path)
+    # Pass schema to MergeEngine so list vs singleton decisions are YANG-driven
+    engine = MergeEngine(strict=strict, report_conflicts=report_conflicts, schema_index=index)
+    merged = engine.merge(trees)
+    if report_conflicts and engine.conflicts:
+        for c in engine.conflicts:
+            typer.echo(f"Conflict: {c}", err=True)
+    # sort the result
     sorted_root = denormalize_tree(SortEngine(index, strict=strict).sort(merged))
     apply_top_level_order(sorted_root, "cli")
 
-    rendered = render_config(sorted_root)
+    rendered = render_set(sorted_root) if format == "set" else render_config(sorted_root)
     if output:
         output.write_text(rendered, encoding="utf-8")
     else:
@@ -200,6 +210,7 @@ def reverse_merge_command(
     filter: list[str] = typer.Option(None, "--filter", help="Extract only the first matching subtree from base and live."),
     strip_comments: bool = typer.Option(False, "--strip-comments", help="Remove all comments from the result."),
     strip_replace: bool = typer.Option(False, "--strip-replace", help="Remove 'replace:' tags from the result."),
+    format: str = typer.Option("curly", "--format", help="Output format: curly (default) or set."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
 ) -> None:
     """Extract minimal overrides from live router config vs generated base (reverse merge / drift extraction)."""
@@ -208,8 +219,8 @@ def reverse_merge_command(
     base_text = _read_input(base)
     live_text = _read_input(live)
 
-    base_root = normalize_tree(parse_config(base_text))
-    live_root = normalize_tree(parse_config(live_text))
+    base_root = _parse_any_config(base_text)
+    live_root = _parse_any_config(live_text)
 
     if filter:
         base_root = filter_config(base_root, filter)
@@ -229,8 +240,8 @@ def reverse_merge_command(
     index = load_schema_index(schema_path)
     sort_engine = SortEngine(index, strict=strict)
 
-    base_sorted = sort_engine.sort(base_root.clone() if hasattr(base_root, 'clone') else normalize_tree(parse_config(base_text)))
-    live_sorted = sort_engine.sort(live_root.clone() if hasattr(live_root, 'clone') else normalize_tree(parse_config(live_text)))
+    base_sorted = sort_engine.sort(base_root.clone())
+    live_sorted = sort_engine.sort(live_root.clone())
 
     # ensure denormalized form not required for diff
     delta = reverse_merge(base_sorted, live_sorted, include_comments=include_comments)
@@ -240,7 +251,7 @@ def reverse_merge_command(
         delta = sort_engine.sort(delta)
         apply_top_level_order(delta, "cli")  # match real `show configuration` top-level order
 
-    rendered = render_config(delta)
+    rendered = render_set(delta) if format == "set" else render_config(delta)
     if output:
         output.write_text(rendered, encoding="utf-8")
     else:

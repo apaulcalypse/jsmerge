@@ -27,13 +27,16 @@ fast = [
 
 [project.scripts]
 jsmerge = "jsmerge.cli.main:app"
-ncs-drift = "jsmerge.cli.ncs_drift:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jsmerge"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "jsmerge/schema/bundles"
+
 [tool.hatch.build.targets.sdist]
 include = ["src/jsmerge", "schemas", "docs"]
+exclude = ["schemas/*.json.cache"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

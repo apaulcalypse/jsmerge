@@ -684,13 +684,15 @@ Same config sorted against two schema versions; document and test expected diffe
 
 ### Phase 2 — Merge + set/delete format + Reverse Merge
 
-- [ ] Overlay merge with conflict reporting
-- [ ] User-ordered list merge strategies
-- [ ] Set/delete format parser and renderer
-- [ ] Comment preservation through merge (default: `--include-comments`)
-- [ ] `jsmerge merge` CLI
-- [ ] `jsmerge reverse-merge` (first-class): generated + live → minimal overrides config
-- [ ] Tree-diff primitives usable by both merge and reverse-merge flows
+**Status (as of 2026-07):** Core merge, reverse-merge, comment handling, tree-diff, and conflict reporting (`--report-conflicts`) are implemented. User-ordered list strategies deferred. Set-format support (pure `set` + `activate`/`deactivate` via `inactive` flag) planned as a ~100-150 LOC dedicated parser that leaves the curly-brace engine untouched; `delete` deferred.
+
+- [x] Overlay merge with conflict reporting
+- [ ] User-ordered list merge strategies (deferred)
+- [ ] Set/delete format parser and renderer (MVP: `set` + activate/deactivate)
+- [x] Comment preservation through merge (default: `--include-comments`)
+- [x] `jsmerge merge` CLI
+- [x] `jsmerge reverse-merge` (first-class): generated + live → minimal overrides config
+- [x] Tree-diff primitives usable by both merge and reverse-merge flows
 
 ### Phase 3 — Full schema coverage + Partition merge
 
