@@ -1,15 +1,15 @@
-"""Optional pyang integration for schema builds."""
+"""pyang integration for schema builds (imported lazily; pyang is slow to import)."""
 
 from __future__ import annotations
 
 import importlib
 from types import ModuleType
 
-_PYANG_IMPORT_ERROR = "pyang is required for schema build; pip install jsmerge[build-schema]"
+_PYANG_IMPORT_ERROR = "pyang is required for schema build; pip install pyang"
 
 
 def load_pyang() -> tuple[ModuleType, ModuleType]:
-    """Import pyang modules when the build-schema extra is installed."""
+    """Import pyang modules on first use."""
     try:
         context = importlib.import_module("pyang.context")
         repository = importlib.import_module("pyang.repository")

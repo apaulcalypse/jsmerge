@@ -19,7 +19,6 @@ def test_build_schema_from_cached_yang():
         modules,
         version="25.4R1-EVO",
         platform="evo",
-        focus_only=True,
     )
     nodes = payload["nodes"]
     assert len(nodes) > 100
