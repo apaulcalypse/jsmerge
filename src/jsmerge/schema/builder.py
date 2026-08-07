@@ -8,10 +8,6 @@ from typing import Literal
 
 from jsmerge.schema._pyang import load_pyang
 
-# When focus_only is True, these top-level stanzas (plus root) are guaranteed in output
-# but the full tree is still built from the resolved schema.
-FOCUS_STANZAS = frozenset({"interfaces", "policy-options", "firewall"})
-
 
 def _keyword(stmt) -> str:
     keyword = stmt.keyword
@@ -60,7 +56,6 @@ def build_schema_index(
     *,
     version: str,
     platform: Literal["evo", "classic"],
-    focus_only: bool = True,
     progress=None,
 ) -> dict:
     context, yang_repository = load_pyang()
@@ -140,9 +135,6 @@ def build_schema_index(
 
     walk_children(configuration.i_children, [])
 
-    if focus_only:
-        nodes = _filter_focus_nodes(nodes)
-
     if progress is not None:
         progress.finish(f"Built schema index ({len(nodes):,} paths)")
 
@@ -153,50 +145,18 @@ def build_schema_index(
     }
 
 
-def _filter_focus_nodes(nodes: dict[str, dict]) -> dict[str, dict]:
-    """Keep root ordering and focus stanza subtrees."""
-    keep: dict[str, dict] = {}
-
-    # Always keep root
-    if "" in nodes:
-        root = nodes[""]
-        keep[""] = {
-            "child_order": list(root["child_order"]),
-            "lists": dict(root["lists"]),
-        }
-
-    for path_str, rule in nodes.items():
-        if not path_str:
-            continue
-        top = path_str.split("/")[0]
-        if top in FOCUS_STANZAS:
-            keep[path_str] = rule
-            # Ensure ancestor paths exist for prefix walking
-            parts = path_str.split("/")
-            for i in range(1, len(parts)):
-                ancestor = "/".join(parts[:i])
-                if ancestor in nodes and ancestor not in keep:
-                    keep[ancestor] = nodes[ancestor]
-
-    return keep
-
-
 def write_schema_index(
     yang_dir: Path,
     output: Path,
     *,
     version: str,
     platform: Literal["evo", "classic"],
-    focus_only: bool = True,
     progress=None,
 ) -> None:
-    from jsmerge.schema.loader import _parse_schema_payload, write_schema_cache
-
     payload = build_schema_index(
         yang_dir,
         version=version,
         platform=platform,
-        focus_only=focus_only,
         progress=progress,
     )
     if progress is not None:
@@ -207,9 +167,3 @@ def write_schema_index(
 
     if progress is not None:
         progress.finish(f"Wrote schema bundle to {output}")
-        progress.step("Writing schema cache")
-
-    write_schema_cache(_parse_schema_payload(payload), output)
-
-    if progress is not None:
-        progress.finish("Wrote schema cache")

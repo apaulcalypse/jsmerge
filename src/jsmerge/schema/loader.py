@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import pickle
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -14,7 +13,6 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 SchemaPath = str
-CACHE_SUFFIX = ".cache"
 
 
 @dataclass
@@ -96,40 +94,12 @@ def _parse_schema_json(path: Path) -> SchemaIndex:
     return _parse_schema_payload(_load_json(path))
 
 
-def schema_cache_path(json_path: Path) -> Path:
-    return json_path.with_name(json_path.name + CACHE_SUFFIX)
-
-
-def write_schema_cache(index: SchemaIndex, json_path: Path) -> Path:
-    """Write a pickle cache for faster subsequent loads."""
-    cache_path = schema_cache_path(json_path)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with cache_path.open("wb") as handle:
-        pickle.dump(index, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    return cache_path
-
-
 @lru_cache(maxsize=8)
 def _load_schema_cached(resolved: str, mtime_ns: int) -> SchemaIndex:
     path = Path(resolved)
-    cache_path = schema_cache_path(path)
+    logger.debug("Loading schema JSON %s", path)
+    return _parse_schema_json(path)
 
-    if cache_path.is_file() and cache_path.stat().st_mtime_ns >= mtime_ns:
-        try:
-            with cache_path.open("rb") as handle:
-                index = pickle.load(handle)
-            logger.debug("Loaded schema cache %s", cache_path)
-            return index
-        except (OSError, pickle.UnpicklingError) as exc:
-            logger.debug("Schema cache unreadable (%s); rebuilding from JSON", exc)
-
-    index = _parse_schema_json(path)
-    try:
-        write_schema_cache(index, path)
-        logger.debug("Wrote schema cache %s", cache_path)
-    except OSError as exc:
-        logger.debug("Could not write schema cache: %s", exc)
-    return index
 
 def load_schema_index(path: Path) -> SchemaIndex:
     resolved = path.resolve()
@@ -160,7 +130,7 @@ def list_schema_bundles(directory: Path | None = None) -> list[Path]:
 
 
 _VERSION_RE = re.compile(
-    r"^(\d+)\.(\d+)[A-Z]?\d*(?:[-.](\d+))?(?:R(\d+(?:\.\d+)?))?(?:[-_](\d+))?(?:-EVO)?",
+    r"^(\d+)\.(\d+)(?:R(\d+(?:\.\d+)?))?(?:[-_]S(\d+(?:\.\d+)*))?(?:[-_]D\d+(?:\.\d+)*)?(?:-EVO)?",
     re.IGNORECASE,
 )
 
@@ -169,20 +139,25 @@ def _normalize_version(version: str) -> str:
     return version.strip().rstrip(";")
 
 
+def _dotted_number_key(value: str | None) -> tuple[int, ...]:
+    if not value:
+        return (0,)
+    return tuple(int(part) for part in value.split("."))
+
+
 def _version_sort_key(stem: str) -> tuple:
     """Sort key for schema bundle filenames (newest first)."""
     evo = 1 if stem.upper().endswith("-EVO") else 0
     match = _VERSION_RE.match(stem)
     if not match:
-        return (evo, 0, 0, 0, 0, stem)
-    major, minor, patch, release, build = match.groups()
+        return (evo, 0, 0, (0,), (0,), stem)
+    major, minor, release, service = match.groups()
     return (
         evo,
         int(major),
         int(minor),
-        int(patch or 0),
-        float(release or 0),
-        int(float(build)) if build else 0,
+        _dotted_number_key(release),
+        _dotted_number_key(service),
         stem,
     )
 

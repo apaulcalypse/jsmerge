@@ -38,13 +38,23 @@ def apply_top_level_order(root: ConfigNode, mode: str) -> None:
     if mode != "cli":
         return
 
-    name_to_node = {child.name: child for child in root.children}
-    ordered: list[ConfigNode] = []
-    for name in CLI_TOP_LEVEL_ORDER:
-        node = name_to_node.pop(name, None)
-        if node is not None:
-            ordered.append(node)
+    # Group by name so duplicate top-level statements are preserved together
+    groups: dict[str, list[ConfigNode]] = {}
+    for child in root.children:
+        groups.setdefault(child.name, []).append(child)
 
-    # Preserve relative order of any unknown statements
-    remaining = sorted(name_to_node.values(), key=lambda n: n.source_index)
-    root.children = ordered + remaining
+    ordered: list[ConfigNode] = []
+    used: set[str] = set()
+    for name in CLI_TOP_LEVEL_ORDER:
+        nodes = groups.get(name)
+        if nodes is not None:
+            ordered.extend(nodes)
+            used.add(name)
+
+    # Preserve relative order of any unknown statements (by first source_index)
+    remaining_names = [n for n in groups if n not in used]
+    remaining_names.sort(key=lambda n: groups[n][0].source_index)
+    for name in remaining_names:
+        ordered.extend(groups[name])
+
+    root.children = ordered

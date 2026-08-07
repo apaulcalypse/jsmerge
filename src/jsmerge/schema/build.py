@@ -43,7 +43,6 @@ def build_schema_from_release(
     platform: Literal["evo", "classic"] | None = None,
     github_ref: str = "master",
     force_fetch: bool = False,
-    focus_only: bool = True,
     cache_dir: Path | None = None,
     progress=None,
 ) -> Path:
@@ -63,7 +62,6 @@ def build_schema_from_release(
         output,
         version=version,
         platform=resolved_platform,
-        focus_only=focus_only,
         progress=reporter,
     )
     return modules_dir

@@ -32,12 +32,21 @@ class SortEngine:
         if cached is not None:
             return cached
 
+        result = join_schema_path(path, node.name)
+
+        # If this node is a keyed list entry, children live under the list definition path,
+        # not under the instance value (e.g. protocols/bgp/group, not protocols/bgp/group/FOO).
+        rule = self.schema.get_rule(path)
+        if rule and node.name in rule.lists:
+            self._path_cache[cache_key] = result
+            return result
+
         if val is not None:
             valued = join_schema_path(path, node.name, val)
             if self.schema.get_rule(valued) is not None:
                 self._path_cache[cache_key] = valued
                 return valued
-        result = join_schema_path(path, node.name)
+
         self._path_cache[cache_key] = result
         return result
 
@@ -45,8 +54,23 @@ class SortEngine:
         rule = self.schema.get_rule(path)
         if rule is None:
             if self.strict:
-                path_str = path or "<root>"
-                raise ValueError(f"No schema rule for path: {path_str}")
+                path_str = SchemaIndex.path_to_str(path) if path else ""
+                parent = path_str.rsplit("/", 1)[0] if "/" in path_str else ""
+                if parent and self.schema.get_rule(parent) is not None:
+                    # Detect list instance paths (e.g. protocols/bgp/group/FOO)
+                    # where the last segment is a user-defined key value, not a schema child.
+                    parts = path_str.split("/")
+                    if len(parts) >= 2:
+                        list_name = parts[-2]
+                        grandparent = "/".join(parts[:-2])
+                        grandparent_rule = self.schema.get_rule(grandparent)
+                        if grandparent_rule and list_name in grandparent_rule.lists:
+                            # This is a list instance key — do not raise
+                            pass
+                        else:
+                            raise ValueError(f"No schema rule for path: {path_str or '<root>'}")
+                    else:
+                        raise ValueError(f"No schema rule for path: {path_str or '<root>'}")
             rule = NodeRule()
 
         grouped: dict[str, list[ConfigNode]] = defaultdict(list)

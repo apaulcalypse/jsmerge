@@ -9,7 +9,12 @@ from conftest import load_fixture, shuffle_reorderable, sort_text
 from jsmerge.normalize import denormalize_tree, normalize_tree
 from jsmerge.parser import parse_config
 from jsmerge.render import render_config
-from jsmerge.schema.loader import load_schema_index, resolve_schema_path
+from jsmerge.schema.loader import (
+    _version_sort_key,
+    latest_schema_bundle,
+    load_schema_index,
+    resolve_schema_path,
+)
 
 SCHEMAS = Path(__file__).parent.parent / "schemas"
 
@@ -94,11 +99,30 @@ def test_permutation_roundtrip():
     assert sort_text(shuffled) == golden
 
 
+def test_version_sort_key_release_order():
+    versions = ["23.4R1-EVO", "23.4R2-EVO", "23.4R9-EVO", "23.4R10-EVO"]
+    ordered = sorted(versions, key=_version_sort_key)
+    assert ordered == ["23.4R1-EVO", "23.4R2-EVO", "23.4R9-EVO", "23.4R10-EVO"]
+    assert _version_sort_key("23.4R10-EVO") > _version_sort_key("23.4R9-EVO")
+    assert _version_sort_key("24.4R2.1") > _version_sort_key("24.4R2")
+    assert _version_sort_key("23.4R2-S3-EVO") > _version_sort_key("23.4R2-EVO")
+
+
+def test_latest_schema_bundle_release_order(tmp_path: Path):
+    for name in ("23.4R1-EVO.json", "23.4R2-EVO.json", "23.4R9-EVO.json", "23.4R10-EVO.json"):
+        (tmp_path / name).write_text(
+            '{"version":"x","platform":"evo","nodes":{}}',
+            encoding="utf-8",
+        )
+    latest = latest_schema_bundle(platform="evo", directory=tmp_path)
+    assert latest is not None
+    assert latest.name == "23.4R10-EVO.json"
+
+
 def test_schema_auto_latest_evo():
     resolved = resolve_schema_path("auto", config_version=None, directory=SCHEMAS)
     assert resolved.name.endswith("-EVO.json")
-    # Should be the newest EVO bundle present
-    evo_bundles = sorted(SCHEMAS.glob("*-EVO.json"), reverse=True)
+    evo_bundles = sorted(SCHEMAS.glob("*-EVO.json"), key=lambda p: _version_sort_key(p.stem), reverse=True)
     assert evo_bundles
     assert resolved == evo_bundles[0]
 
