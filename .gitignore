@@ -9,5 +9,5 @@ build/
 
 # Built schema bundles are generated via `jsmerge schema build` (can be large)
 schemas/*
-!schemas/24.4R2-EVO.json
+!schemas/.gitkeep
 schemas/*.json.cache

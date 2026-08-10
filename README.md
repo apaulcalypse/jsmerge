@@ -31,13 +31,23 @@ This gives you the `jsmerge` CLI with the core sort/merge/reverse-merge commands
 jsmerge --help
 ```
 
+### Build a schema
+
+Sort and merge need a versioned schema index. Ship one with the package, or build the full index for your Junos release from Juniper's public YANG repo (cached under `~/.cache/jsmerge/yang/`):
+
+```bash
+jsmerge schema build --version 25.4R1-EVO -o schemas/25.4R1-EVO.json
+```
+
+Use a classic release string (e.g. `25.4R1`) for non-EVO. Pass a local YANG directory as the first argument if you already have the models.
+
 ### Sort a configuration
 
 ```bash
 jsmerge sort router.conf -o sorted.conf --schema auto
 ```
 
-- `--schema auto` auto-detects the Junos version from the `version` statement (or falls back to latest cached EVO bundle).
+- `--schema auto` auto-detects the Junos version from the `version` statement (or falls back to the latest bundled EVO schema).
 - Use `--filter 'protocols bgp'` to extract only matching subtrees.
 - `--strip-comments` / `--strip-replace` clean the output.
 
@@ -85,16 +95,71 @@ jsmerge schema build --version 25.4R1-EVO -o schemas/25.4R1-EVO.json
 
 ## Python API
 
+### Sort
+
 ```python
+from pathlib import Path
 from jsmerge.api import sort_config
 
 sorted_text = sort_config(
-    open("input.conf").read(),
+    Path("router.conf").read_text(),
     schema="auto",
     filters=["interfaces", "policy-options"],
     strip_comments=True,
 )
 ```
+
+`schema="auto"` picks a bundle from the config's `version` statement (or the latest bundled EVO schema). Pass a path or bundle name (e.g. `"25.4R1-EVO"`) to pin one.
+
+### Overlay merge
+
+```python
+from pathlib import Path
+from jsmerge.merge import MergeEngine
+from jsmerge.normalize import denormalize_tree, normalize_tree
+from jsmerge.parser import parse_config
+from jsmerge.render import render_config
+from jsmerge.schema.loader import load_schema_index, resolve_schema_path
+from jsmerge.sort import SortEngine
+from jsmerge.sort.ordering import apply_top_level_order
+
+trees = [
+    normalize_tree(parse_config(Path(p).read_text()))
+    for p in ("base.conf", "services.conf", "interfaces.conf")
+]
+schema = load_schema_index(resolve_schema_path("auto"))
+merged = MergeEngine(schema_index=schema).merge(trees)
+sorted_root = denormalize_tree(SortEngine(schema).sort(merged))
+apply_top_level_order(sorted_root, "cli")
+print(render_config(sorted_root), end="")
+```
+
+Later trees win on conflicts. Pass `report_conflicts=True` to `MergeEngine` if you want override diagnostics.
+
+### Reverse merge (drift)
+
+```python
+from pathlib import Path
+from jsmerge.merge import reverse_merge
+from jsmerge.normalize import normalize_tree
+from jsmerge.parser import parse_config
+from jsmerge.render import render_config
+from jsmerge.schema.loader import load_schema_index, resolve_schema_path
+from jsmerge.sort import SortEngine
+from jsmerge.sort.ordering import apply_top_level_order
+
+base = normalize_tree(parse_config(Path("generated.conf").read_text()))
+live = normalize_tree(parse_config(Path("live.conf").read_text()))
+schema = load_schema_index(resolve_schema_path("auto"))
+engine = SortEngine(schema)
+
+delta = reverse_merge(engine.sort(base), engine.sort(live))
+delta = engine.sort(delta)
+apply_top_level_order(delta, "cli")
+print(render_config(delta), end="")
+```
+
+For set-format input/output, use `parse_set_config` / `render_set` instead of the curly-brace helpers.
 
 ## Features
 
