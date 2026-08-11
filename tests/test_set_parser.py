@@ -1,8 +1,24 @@
 """Tests for Junos set-format parsing and rendering."""
 
+from pathlib import Path
+
+import jsmerge.parser.set_parser as set_parser
 from jsmerge.normalize import normalize_tree
-from jsmerge.parser.set_parser import parse_set_config
+from jsmerge.parser.set_parser import parse_set_config, peek_set_version
+from jsmerge.render.renderer import render_config
 from jsmerge.render.set_renderer import render_set
+from jsmerge.schema.loader import load_schema_index
+
+SCHEMAS = Path(__file__).parent.parent / "schemas"
+
+
+def _shipped_schema():
+    path = SCHEMAS / "25.4R1-EVO.json"
+    if not path.is_file():
+        bundles = sorted(SCHEMAS.glob("*.json"))
+        assert bundles, "No schema bundles in schemas/"
+        path = bundles[0]
+    return load_schema_index(path)
 
 
 def test_sibling_protocols_bgp_and_ospf():
@@ -89,3 +105,111 @@ set interfaces ge-0/0/0 disable
     names = {c.name for c in iface.children}
     assert "unit" in names
     assert "disable" in names
+
+
+def test_peek_set_version():
+    text = """
+set system host-name x
+set version 25.4R1-EVO;
+set protocols isis
+"""
+    assert peek_set_version(text) == "25.4R1-EVO"
+
+
+def test_schema_isis_level_and_auth_leaves_without_allowlists(monkeypatch):
+    """Schema must classify level/auth — not the fallback frozensets."""
+    monkeypatch.setattr(
+        set_parser,
+        "LIST_KEYED_STATEMENTS",
+        frozenset(x for x in set_parser.LIST_KEYED_STATEMENTS if x != "level"),
+    )
+    monkeypatch.setattr(
+        set_parser,
+        "VALUE_LEAVES",
+        frozenset(
+            x
+            for x in set_parser.VALUE_LEAVES
+            if x
+            not in {
+                "metric",
+                "hello-authentication-key",
+                "hello-authentication-type",
+            }
+        ),
+    )
+
+    schema = _shipped_schema()
+    text = """
+set protocols isis interface ae26.0 level 2 metric 1
+set protocols isis interface ae26.0 level 2 hello-authentication-key TODOADDVAULTPATH
+set protocols isis interface ae26.0 level 2 hello-authentication-type md5
+set protocols isis interface ae26.0 point-to-point
+"""
+    root = parse_set_config(text, schema=schema)
+    iface = root.children[0].children[0].children[0]
+    assert iface.name == "interface" and iface.raw_tail == ["ae26.0"]
+
+    level = next(c for c in iface.children if c.name == "level")
+    assert level.raw_tail == ["2"]
+    assert not any(c.name == "2" for c in level.children)
+
+    by_name = {c.name: c for c in level.children}
+    assert by_name["metric"].raw_tail == ["1"]
+    assert by_name["hello-authentication-key"].raw_tail == ["TODOADDVAULTPATH"]
+    assert by_name["hello-authentication-type"].raw_tail == ["md5"]
+
+    rendered = render_config(root)
+    assert "level 2 {" in rendered
+    assert "level {" not in rendered
+    assert "hello-authentication-key TODOADDVAULTPATH;" in rendered
+    assert "hello-authentication-type md5;" in rendered
+    assert "point-to-point;" in rendered
+
+
+def test_schema_isis_unit_nesting_still_list_keys_level(monkeypatch):
+    """Off-schema 'unit' under isis must not break schema list-key for level."""
+    monkeypatch.setattr(
+        set_parser,
+        "LIST_KEYED_STATEMENTS",
+        frozenset(x for x in set_parser.LIST_KEYED_STATEMENTS if x != "level"),
+    )
+    monkeypatch.setattr(
+        set_parser,
+        "VALUE_LEAVES",
+        frozenset(x for x in set_parser.VALUE_LEAVES if x != "metric"),
+    )
+
+    schema = _shipped_schema()
+    text = """
+set protocols isis interface ae26 unit 0 level 2 metric 1
+set protocols isis interface ae26 unit 0 level 2 hello-authentication-key TODOADDVAULTPATH
+set protocols isis interface ae26 unit 0 point-to-point
+"""
+    root = parse_set_config(text, schema=schema)
+    rendered = render_config(root)
+    assert "level 2 {" in rendered
+    assert "level {" not in rendered
+    assert "hello-authentication-key TODOADDVAULTPATH;" in rendered
+    assert "metric 1;" in rendered
+
+
+def test_schema_family_inet_cli_keyed(monkeypatch):
+    """family inet must use CLI_KEYED_CONTAINERS + schema, not LIST_KEYED fallback."""
+    monkeypatch.setattr(
+        set_parser,
+        "LIST_KEYED_STATEMENTS",
+        frozenset(x for x in set_parser.LIST_KEYED_STATEMENTS if x != "family"),
+    )
+    schema = _shipped_schema()
+    # Explicit list keyword so schema path stays on interfaces/interface/unit
+    text = "set interfaces interface ge-0/0/0 unit 0 family inet address 10.0.0.1/24\n"
+    root = parse_set_config(text, schema=schema)
+    iface = root.children[0].children[0]
+    assert iface.name == "interface" and iface.raw_tail == ["ge-0/0/0"]
+    unit = next(c for c in iface.children if c.name == "unit")
+    family = next(c for c in unit.children if c.name == "family")
+    assert family.raw_tail == ["inet"]
+    assert not any(c.name == "inet" for c in family.children)
+    assert family.children[0].name == "address"
+    assert family.children[0].raw_tail == ["10.0.0.1/24"]
+    assert "family inet {" in render_config(root)

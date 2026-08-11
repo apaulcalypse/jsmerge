@@ -14,11 +14,11 @@ from jsmerge.merge import MergeEngine, reverse_merge
 from jsmerge.models import ConfigNode
 from jsmerge.normalize import denormalize_tree, normalize_tree
 from jsmerge.parser import parse_config
-from jsmerge.parser.set_parser import parse_set_config
+from jsmerge.parser.set_parser import parse_set_config, peek_set_version
 from jsmerge.progress import NullProgress, TerminalProgress
 from jsmerge.render import render_config, render_set
 from jsmerge.schema.build import build_schema_from_release
-from jsmerge.schema.loader import load_schema_index, release_schema_memory_cache, resolve_schema_path
+from jsmerge.schema.loader import SchemaIndex, load_schema_index, release_schema_memory_cache, resolve_schema_path
 from jsmerge.sort import SortEngine
 from jsmerge.sort.ordering import apply_top_level_order
 
@@ -51,11 +51,27 @@ def _config_version(root) -> str | None:
     return None
 
 
-def _parse_any_config(text: str) -> "ConfigNode":
-    """Auto-detect set vs curly format and return a normalized ConfigNode root."""
+def _is_set_format(text: str) -> bool:
     stripped = text.lstrip()
-    if stripped.startswith("set ") or stripped.startswith("deactivate ") or stripped.startswith("activate "):
-        return normalize_tree(parse_set_config(text))
+    return (
+        stripped.startswith("set ")
+        or stripped.startswith("deactivate ")
+        or stripped.startswith("activate ")
+    )
+
+
+def _load_schema_for_text(text: str, schema: str, *, is_set: bool) -> tuple[SchemaIndex, Path, str | None]:
+    """Resolve and load schema, peeking set-format version before parse when needed."""
+    config_version = peek_set_version(text) if is_set else None
+    schema_path = resolve_schema_path(schema, config_version=config_version)
+    index = load_schema_index(schema_path)
+    return index, schema_path, config_version
+
+
+def _parse_any_config(text: str, schema_index: SchemaIndex | None = None) -> ConfigNode:
+    """Auto-detect set vs curly format and return a normalized ConfigNode root."""
+    if _is_set_format(text):
+        return normalize_tree(parse_set_config(text, schema=schema_index))
     return normalize_tree(parse_config(text))
 
 
@@ -76,9 +92,17 @@ def sort_command(
     logging.basicConfig(level=logging.DEBUG if verbose else logging.WARNING)
 
     text = _read_input(input)
-    root = _parse_any_config(text)
-    config_version = _config_version(root)
-    schema_path = resolve_schema_path(schema, config_version=config_version)
+    is_set = _is_set_format(text)
+    if is_set:
+        index, schema_path, peeked_version = _load_schema_for_text(text, schema, is_set=True)
+        root = _parse_any_config(text, schema_index=index)
+        config_version = _config_version(root) or peeked_version
+    else:
+        root = _parse_any_config(text)
+        config_version = _config_version(root)
+        schema_path = resolve_schema_path(schema, config_version=config_version)
+        index = load_schema_index(schema_path)
+
     if verbose:
         typer.echo(f"Using schema: {schema_path}", err=True)
         if config_version:
@@ -93,7 +117,6 @@ def sort_command(
     if strip_replace:
         root = do_strip_replace(root)
 
-    index = load_schema_index(schema_path)
     engine = SortEngine(index, strict=strict)
     sorted_root = denormalize_tree(engine.sort(root))
 
@@ -107,7 +130,6 @@ def sort_command(
         typer.echo(rendered, nl=False)
 
     release_schema_memory_cache()
-
 
 @schema_app.command("build")
 def schema_build_command(
@@ -160,11 +182,21 @@ def merge_command(
     """Merge multiple configs using overlay strategy."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.WARNING)
 
+    raw_inputs = [_read_input(inp) for inp in inputs]
+    config_version = next(
+        (ver for text in raw_inputs if _is_set_format(text) for ver in [peek_set_version(text)] if ver),
+        None,
+    )
+    has_set = any(_is_set_format(t) for t in raw_inputs)
+    index: SchemaIndex | None = None
+    schema_path: Path | None = None
+    if has_set:
+        schema_path = resolve_schema_path(schema, config_version=config_version)
+        index = load_schema_index(schema_path)
+
     trees = []
-    config_version = None
-    for inp in inputs:
-        text = _read_input(inp)
-        root = _parse_any_config(text)
+    for text in raw_inputs:
+        root = _parse_any_config(text, schema_index=index if _is_set_format(text) else None)
         if filter:
             root = filter_config(root, filter)
         if strip_comments or not include_comments:
@@ -175,11 +207,12 @@ def merge_command(
             config_version = _config_version(root)
         trees.append(root)
 
-    schema_path = resolve_schema_path(schema, config_version=config_version)
+    if index is None:
+        schema_path = resolve_schema_path(schema, config_version=config_version)
+        index = load_schema_index(schema_path)
     if verbose:
         typer.echo(f"Using schema: {schema_path}", err=True)
 
-    index = load_schema_index(schema_path)
     # Pass schema to MergeEngine so list vs singleton decisions are YANG-driven
     engine = MergeEngine(strict=strict, report_conflicts=report_conflicts, schema_index=index)
     merged = engine.merge(trees)
@@ -219,8 +252,23 @@ def reverse_merge_command(
     base_text = _read_input(base)
     live_text = _read_input(live)
 
-    base_root = _parse_any_config(base_text)
-    live_root = _parse_any_config(live_text)
+    peeked = peek_set_version(base_text) if _is_set_format(base_text) else None
+    if peeked is None and _is_set_format(live_text):
+        peeked = peek_set_version(live_text)
+    needs_early_schema = _is_set_format(base_text) or _is_set_format(live_text)
+    if needs_early_schema:
+        schema_path = resolve_schema_path(schema, config_version=peeked)
+        index = load_schema_index(schema_path)
+        base_root = _parse_any_config(base_text, schema_index=index if _is_set_format(base_text) else None)
+        live_root = _parse_any_config(live_text, schema_index=index if _is_set_format(live_text) else None)
+    else:
+        base_root = _parse_any_config(base_text)
+        live_root = _parse_any_config(live_text)
+        schema_path = resolve_schema_path(
+            schema,
+            config_version=_config_version(base_root) or _config_version(live_root),
+        )
+        index = load_schema_index(schema_path)
 
     if filter:
         base_root = filter_config(base_root, filter)
@@ -232,12 +280,12 @@ def reverse_merge_command(
         base_root = do_strip_replace(base_root)
         live_root = do_strip_replace(live_root)
 
-    config_version = _config_version(base_root) or _config_version(live_root)
-    schema_path = resolve_schema_path(schema, config_version=config_version)
+    config_version = _config_version(base_root) or _config_version(live_root) or peeked
     if verbose:
         typer.echo(f"Using schema: {schema_path}", err=True)
+        if config_version:
+            typer.echo(f"Config version: {config_version}", err=True)
 
-    index = load_schema_index(schema_path)
     sort_engine = SortEngine(index, strict=strict)
 
     base_sorted = sort_engine.sort(base_root.clone())

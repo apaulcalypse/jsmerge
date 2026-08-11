@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jsmerge"
-version = "0.2.1"
+version = "0.2.2"
 description = "Sort and merge Juniper Junos configurations to canonical show-configuration order"
 readme = "README.md"
 requires-python = ">=3.11"
